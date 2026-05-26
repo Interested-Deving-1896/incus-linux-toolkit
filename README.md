@@ -74,10 +74,11 @@ Original project — Incus-backed distrobox replacement using any Linux distro i
 | File | Description |
 |---|---|
 | [dep-graph/origins.md](https://github.com/Interested-Deving-1896/incusbox/blob/main/dep-graph/origins.md) | Dependency graph (Markdown table) |
+| [config/gitlab-subgroups.yml](https://github.com/Interested-Deving-1896/incusbox/blob/main/config/gitlab-subgroups.yml) | GitLab subgroup map |
 <!-- AI:end:resources -->
 
 ## License
 
 <!-- AI:start:license -->
-<!-- License not detected — add a LICENSE file to this repo. -->
+[GPL-3.0](https://github.com/Interested-Deving-1896/incusbox/blob/main/LICENSE) © 2026 [Interested-Deving-1896](https://github.com/Interested-Deving-1896)
 <!-- AI:end:license -->
