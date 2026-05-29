@@ -1,15 +1,15 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-only
-# incusbox shared library.
+# incus-box shared library.
 # Source this file; do not execute directly.
 #
-# Every incusbox-* script sources this file to get:
+# Every incus-box-* script sources this file to get:
 #   - USER/HOME/SHELL normalisation
 #   - Config file loading
 #   - Logging helpers (log, die, info, warn)
 #   - Incus binary resolution (INCUS + INCUS_SOCKET)
 #   - require_incus / require_cmd
-#   - incusbox_doctor
+#   - incus-box_doctor
 
 # ── environment normalisation ─────────────────────────────────────────────────
 [ -z "${USER}"  ] && USER="$(id -run)"
@@ -20,21 +20,21 @@ export USER HOME SHELL
 # ── config loading ────────────────────────────────────────────────────────────
 # Config files are sourced in order; later files override earlier ones.
 # Scripts may set INCUSBOX_SKIP_CONFIG=1 to suppress loading (tests).
-_incusbox_load_config() {
+_incus-box_load_config() {
     [ "${INCUSBOX_SKIP_CONFIG:-0}" = "1" ] && return 0
     local _cf
     for _cf in \
-        /usr/share/incusbox/incusbox.conf \
-        /usr/local/share/incusbox/incusbox.conf \
-        /etc/incusbox/incusbox.conf \
-        "${XDG_CONFIG_HOME:-${HOME}/.config}/incusbox/incusbox.conf" \
-        "${HOME}/.incusboxrc"
+        /usr/share/incus-box/incus-box.conf \
+        /usr/local/share/incus-box/incus-box.conf \
+        /etc/incus-box/incus-box.conf \
+        "${XDG_CONFIG_HOME:-${HOME}/.config}/incus-box/incus-box.conf" \
+        "${HOME}/.incus-boxrc"
     do
         # shellcheck disable=SC1090
         if [ -e "${_cf}" ]; then . "$(realpath "${_cf}")"; fi
     done
 }
-_incusbox_load_config
+_incus-box_load_config
 
 # ── logging ───────────────────────────────────────────────────────────────────
 log()  { printf >&2 '%s\n' "$*"; }
@@ -84,10 +84,10 @@ require_cmd() {
 }
 
 # ── container metadata helpers ────────────────────────────────────────────────
-# Read a user.incusbox.* config key from a named container.
+# Read a user.incus-box.* config key from a named container.
 # Usage: container_config NAME KEY
 container_config() {
-    ${INCUS} config get "$1" "user.incusbox.$2" 2>/dev/null || true
+    ${INCUS} config get "$1" "user.incus-box.$2" 2>/dev/null || true
 }
 
 # Return the lowercase status of a container ("running", "stopped", …)
@@ -96,7 +96,7 @@ container_status() {
 }
 
 # ── doctor ────────────────────────────────────────────────────────────────────
-incusbox_doctor() {
+incus-box_doctor() {
     local _ok=0 _fail=0
 
     _chk_cmd() {
@@ -117,7 +117,7 @@ incusbox_doctor() {
         fi
     }
 
-    printf 'incusbox doctor\n\n'
+    printf 'incus-box doctor\n\n'
     printf 'Required:\n'
     _chk_cmd incus
 
