@@ -1,0 +1,182 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incus-box: top-level dispatcher
+# Routes subcommands to the appropriate incus-box-* script.
+
+set -e
+
+version="0.1.0"
+
+# ── shared library ────────────────────────────────────────────────────────────
+_self="$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_lib="$(dirname "${_self}")/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incus-box/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+# ── locate script directory ───────────────────────────────────────────────────
+# Resolve symlinks so we find the real script directory even when incus-box
+# is invoked via a symlink in /usr/local/bin.
+self="$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+script_dir="$(dirname "${self}")"
+
+show_help() {
+    cat <<EOF
+incus-box version: ${version}
+
+Use any Linux distribution inside your terminal via Incus system containers.
+Provides tight host integration: shared HOME, X11/Wayland, audio, GPU, USB.
+
+Usage:
+  incus-box COMMAND [OPTIONS] [ARGS...]
+
+Commands:
+  create      Create a new incus-box container
+  start       Start one or more stopped containers
+  stop        Stop one or more running containers
+  build       Build a custom Incus image from a base + provisioning script
+  disk        Live disk resize (resize, info)
+  enter       Enter an existing incus-box container
+  list        List incus-box containers
+  rm          Remove an incus-box container
+  upgrade     Upgrade packages inside a container
+  export      Export an app/binary/service from inside a container
+  host-exec   Run a host command from inside a container
+  completion  Generate shell completion script (bash|zsh|fish)
+
+  snapshot        Create, list, restore, delete, and auto-schedule snapshots
+  console         Attach to a container console (serial/VGA)
+  backup          Export/list/delete container backup archives
+  restore         Import a container from a backup archive
+  publish         Create, list, and delete Incus images from containers
+  import          Import an Incus image from a file
+  fleet           Multi-container orchestration (start-all, stop-all, backup-all)
+  monitor         Show container resource usage and stats
+  net             Manage network port forwarding (proxy devices)
+  usb             Manage USB device passthrough
+  gpu             Manage GPU passthrough
+  cloud-sync      Sync backups to cloud storage via rclone
+
+  profiles        Manage Incus profiles (list, install, diff, apply)
+  template        List and inspect container creation templates
+  talos           Manage Talos Linux VMs (fetch, import, launch, list)
+  status          Show status of one or all containers/VMs
+  config          Show, edit, and manage incus-box configuration
+  demo            Manage a local incus-demo-server instance
+  winesapos       Fetch, import, and launch winesapOS gaming VMs
+  assemble        Create/update containers from a declarative YAML file
+  setup-rootless  Guided setup for rootless incus-box via incus-user
+  update          Check for and install incus-box updates
+  tui             Launch interactive terminal UI (requires dialog or whiptail)
+  dashboard       Launch web monitoring dashboard (requires socat/ncat/python3)
+  doctor          Check prerequisites and runtime environment
+
+  version     Show version
+  help        Show this help
+
+Run 'incus-box COMMAND --help' for command-specific options.
+
+Examples:
+  incus-box create --image docker:ubuntu:22.04 --name mybox
+  incus-box enter mybox
+  incus-box create --image images:fedora/40 --name fedbox --nvidia
+  incus-box create --image docker:archlinux --name arch --storage-pool tank
+  incus-box list
+  incus-box rm mybox
+  incus-box snapshot create mybox before-upgrade
+  incus-box snapshot restore mybox before-upgrade
+  incus-box console mybox
+  incus-box backup mybox --output /tmp/mybox.tar.gz
+  incus-box restore mybox --from /tmp/mybox.tar.gz
+EOF
+}
+
+show_version() {
+    printf 'incus-box %s\n' "${version}"
+}
+
+# ── find and exec subcommand script ──────────────────────────────────────────
+run_subcommand() {
+    local cmd="$1"
+    shift
+
+    # Look for incus-box-CMD in the same directory as this script first,
+    # then fall back to PATH.
+    local script="${script_dir}/incus-box-${cmd}"
+    if [ ! -x "${script}" ]; then
+        script="$(command -v "incus-box-${cmd}" 2>/dev/null || true)"
+    fi
+
+    if [ -z "${script}" ] || [ ! -x "${script}" ]; then
+        printf >&2 "incus-box: unknown command '%s'\n" "${cmd}"
+        printf >&2 "Run 'incus-box help' for usage.\n"
+        exit 1
+    fi
+
+    exec "${script}" "$@"
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+[ "$#" -eq 0 ] && { show_help; exit 0; }
+
+cmd="$1"
+shift
+
+case "${cmd}" in
+    # Core commands
+    create)    run_subcommand create    "$@" ;;
+    start)     run_subcommand start     "$@" ;;
+    build)     run_subcommand build     "$@" ;;
+    disk)      run_subcommand disk      "$@" ;;
+    enter)     run_subcommand enter     "$@" ;;
+    list|ls)   run_subcommand list      "$@" ;;
+    rm|remove) run_subcommand rm        "$@" ;;
+    stop)      run_subcommand stop      "$@" ;;
+    upgrade)   run_subcommand upgrade   "$@" ;;
+
+    # Snapshot / console / backup / image / fleet / monitor
+    snapshot)       run_subcommand snapshot       "$@" ;;
+    console)        run_subcommand console        "$@" ;;
+    backup)         run_subcommand backup         "$@" ;;
+    backup-list)    run_subcommand backup-list    "$@" ;;
+    backup-delete)  run_subcommand backup-delete  "$@" ;;
+    restore)        run_subcommand restore        "$@" ;;
+    publish)        run_subcommand publish        "$@" ;;
+    import)         run_subcommand import         "$@" ;;
+    fleet)          run_subcommand fleet          "$@" ;;
+    monitor)        run_subcommand monitor        "$@" ;;
+    net)            run_subcommand net            "$@" ;;
+    usb)            run_subcommand usb            "$@" ;;
+    gpu)            run_subcommand gpu            "$@" ;;
+    cloud-sync)     run_subcommand cloud-sync     "$@" ;;
+
+    # Declarative config
+    profiles)       run_subcommand profiles       "$@" ;;
+    template)       run_subcommand template       "$@" ;;
+    talos)          run_subcommand talos          "$@" ;;
+    status)         run_subcommand status         "$@" ;;
+    config)         run_subcommand config         "$@" ;;
+    demo)           run_subcommand demo           "$@" ;;
+    winesapos)      run_subcommand winesapos      "$@" ;;
+    assemble)       run_subcommand assemble       "$@" ;;
+    update)         run_subcommand update         "$@" ;;
+    setup-rootless) run_subcommand setup-rootless "$@" ;;
+
+    # In-container commands (also callable from host for scripting)
+    export)    run_subcommand export    "$@" ;;
+    host-exec)  run_subcommand host-exec  "$@" ;;
+    completion) run_subcommand completion "$@" ;;
+
+    # Meta
+    tui)            run_subcommand tui            "$@" ;;
+    dashboard)      run_subcommand dashboard      "$@" ;;
+    doctor)         run_subcommand doctor         "$@" ;;
+    version|-V|--version) show_version ;;
+    help|-h|--help)       show_help ;;
+
+    # Unknown
+    *)
+        printf >&2 "incus-box: unknown command '%s'\n" "${cmd}"
+        printf >&2 "Run 'incus-box help' for usage.\n"
+        exit 1 ;;
+esac
