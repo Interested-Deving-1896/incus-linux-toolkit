@@ -1,0 +1,96 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incus-box-backup: export an incus-box container to a portable archive.
+#
+# Uses 'incus export' which produces a tarball containing the container
+# rootfs and metadata. The archive can be imported with incus-box-restore.
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incus-box/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+_self_dir="$(cd "$(dirname "$0")" && pwd)"
+
+show_help() {
+    cat <<EOF
+incus-box-backup — export a container to a portable archive
+
+Usage:
+  incus-box backup create NAME [-o PATH] [--optimized]
+  incus-box backup list   [DIR]
+  incus-box backup delete NAME [--dir DIR]
+
+Subcommands:
+  create NAME   Export a container to a backup archive (default when NAME given)
+  list [DIR]    List backup archives
+  delete NAME   Delete a backup archive
+
+Options (create):
+  -o, --output PATH   Output archive path (default: NAME-<timestamp>.tar.gz)
+      --optimized     Use storage-driver-optimised format (faster, less portable)
+  -h, --help          Show this help
+
+Examples:
+  incus-box backup mybox
+  incus-box backup create mybox --output /backups/mybox.tar.gz
+  incus-box backup list
+  incus-box backup delete mybox-20240101-120000.tar.gz
+EOF
+}
+
+_cmd_create() {
+    local name="" output="" optimized=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -o|--output)   output="$2"; shift 2 ;;
+            --optimized)   optimized=1; shift ;;
+            -h|--help)     show_help; exit 0 ;;
+            -*) die "Unknown option: $1" ;;
+            *) name="$1"; shift ;;
+        esac
+    done
+
+    [ -z "${name}" ] && { show_help; exit 1; }
+    require_incus
+    [ -z "${output}" ] && output="${name}-$(date +%Y%m%d-%H%M%S).tar.gz"
+    log "Exporting container '${name}' to '${output}' ..."
+    local export_args=""
+    [ "${optimized}" -eq 1 ] && export_args="--optimized-storage"
+    # shellcheck disable=SC2086
+    ${INCUS} export "${name}" "${output}" ${export_args}
+    log "Backup complete: ${output}"
+}
+
+[ "$#" -eq 0 ] && { show_help; exit 0; }
+subcmd="$1"
+
+case "${subcmd}" in
+    list|ls)
+        shift
+        exec "${_self_dir}/incus-box-backup-list" "$@"
+        ;;
+    delete|rm)
+        shift
+        exec "${_self_dir}/incus-box-backup-delete" "$@"
+        ;;
+    create)
+        shift
+        _cmd_create "$@"
+        ;;
+    -h|--help|help)
+        show_help
+        ;;
+    # Legacy / default: bare NAME passed directly
+    -*)
+        die "Unknown option: ${subcmd}. Run: incus-box backup help"
+        ;;
+    *)
+        _cmd_create "$@"
+        ;;
+esac
