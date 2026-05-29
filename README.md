@@ -1,10 +1,23 @@
 [update-readmes]   Mode: rewrite — migrating to template structure...
-# incusbox
+# incus-box
 
-[![Built with Ona](https://ona.com/build-with-ona.svg)](https://app.ona.com/#https://github.com/Interested-Deving-1896/incusbox)
+[![Built with Ona](https://ona.com/build-with-ona.svg)](https://app.ona.com/#https://github.com/Interested-Deving-1896/incus-box)
 
 <!-- AI:start:what-it-does -->
-_Description pending._
+`incus-box` is a distrobox-inspired tool that uses [Incus](https://github.com/lxc/incus) instead of
+Docker or Podman as the container runtime. It lets you use any Linux distribution inside your
+terminal with tight host integration: shared HOME, X11/Wayland, audio, GPU, and USB passthrough.
+
+Unlike distrobox, `incus-box` supports the full Incus workload spectrum:
+
+| Workload | Backend | Use case |
+|---|---|---|
+| **System containers** | LXC (default) | Distro environments, dev boxes, services |
+| **Virtual machines** | KVM / QEMU | Full kernel isolation, Windows, Talos, winesapOS |
+| **OCI containers** | OCI runtime | Docker-compatible images via `docker:` prefix |
+
+This means you can run an Ubuntu dev container, a Fedora VM, and a Docker image side by side
+under the same `incus-box` interface.
 <!-- AI:end:what-it-does -->
 
 ## Architecture
@@ -15,12 +28,24 @@ _Architecture documentation pending._
 
 ## Install
 
-<!-- Add installation instructions here. This section is yours — the AI will not modify it. -->
-
 ```bash
-git clone https://github.com/Interested-Deving-1896/incusbox.git
-cd incusbox
+git clone https://github.com/Interested-Deving-1896/incus-linux-toolkit.git
+cd incus-linux-toolkit
+sudo ./incusbox/install          # system-wide
+# or
+./incusbox/install --user        # ~/.local (no root)
 ```
+
+The installer creates `incus-box` and all `incus-box-*` subcommand symlinks in your `$PATH`.
+It also installs a `incusbox` → `incus-box` compatibility symlink so existing scripts and
+muscle memory continue to work.
+
+### Rename note
+
+This repository was previously named `incusbox` and the command was `incusbox`.
+Both have been renamed to `incus-box` for consistency with the `incus-*` ecosystem naming
+convention. The old name redirects automatically on GitHub. The installer provides the
+`incusbox` compatibility symlink for a smooth transition.
 
 ## Usage
 
@@ -39,10 +64,10 @@ _CI documentation pending._
 ## Mirror chain
 
 <!-- AI:start:mirror-chain -->
-This repo is maintained in [`Interested-Deving-1896/incusbox`](https://github.com/Interested-Deving-1896/incusbox) and mirrored through:
+This repo is maintained in [`Interested-Deving-1896/incus-box`](https://github.com/Interested-Deving-1896/incus-box) and mirrored through:
 
 ```
-Interested-Deving-1896/incusbox  ──►  OpenOS-Project-OSP/incusbox  ──►  OpenOS-Project-Ecosystem-OOC/incusbox
+Interested-Deving-1896/incus-box  ──►  OpenOS-Project-OSP/incus-box  ──►  OpenOS-Project-Ecosystem-OOC/incus-box
 ```
 
 Changes flow downstream automatically via the hourly mirror chain in
@@ -59,13 +84,14 @@ _Contributors pending._
 ## Origins
 
 <!-- AI:start:origins -->
+Original project — clean-room reimplementation of the distrobox concept using Incus instead of
+Docker/Podman. Not a git fork of distrobox; shares the UX model and subcommand structure but
+replaces the entire container runtime layer.
 
-Original project — Incus-backed distrobox replacement using any Linux distro in the terminal via Incus containers.
-
-| Origin | Host | Fork in I-D-1896 |
-|--------|------|-----------------|
-| [lxc/incus](https://github.com/lxc/incus) | GitHub | ✅ |
-| [89luca89/distrobox](https://github.com/89luca89/distrobox) | GitHub | ✅ |
+| Origin | Host | Relationship |
+|--------|------|-------------|
+| [lxc/incus](https://github.com/lxc/incus) | GitHub | Runtime dependency — tracked as upstream |
+| [89luca89/distrobox](https://github.com/89luca89/distrobox) | GitHub | Conceptual upstream — feature reference only, not synced |
 <!-- AI:end:origins -->
 
 ## Resources
@@ -73,12 +99,12 @@ Original project — Incus-backed distrobox replacement using any Linux distro i
 <!-- AI:start:resources -->
 | File | Description |
 |---|---|
-| [dep-graph/origins.md](https://github.com/Interested-Deving-1896/incusbox/blob/main/dep-graph/origins.md) | Dependency graph (Markdown table) |
-| [config/gitlab-subgroups.yml](https://github.com/Interested-Deving-1896/incusbox/blob/main/config/gitlab-subgroups.yml) | GitLab subgroup map |
+| [dep-graph/origins.md](https://github.com/Interested-Deving-1896/incus-box/blob/main/dep-graph/origins.md) | Dependency graph (Markdown table) |
+| [config/gitlab-subgroups.yml](https://github.com/Interested-Deving-1896/incus-box/blob/main/config/gitlab-subgroups.yml) | GitLab subgroup map |
 <!-- AI:end:resources -->
 
 ## License
 
 <!-- AI:start:license -->
-[GPL-3.0](https://github.com/Interested-Deving-1896/incusbox/blob/main/LICENSE) © 2026 [Interested-Deving-1896](https://github.com/Interested-Deving-1896)
+[GPL-3.0](https://github.com/Interested-Deving-1896/incus-box/blob/main/LICENSE) © 2026 [Interested-Deving-1896](https://github.com/Interested-Deving-1896)
 <!-- AI:end:license -->
