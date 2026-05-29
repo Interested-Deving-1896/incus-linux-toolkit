@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-only
-# incusbox install script
-# Installs incusbox scripts, profiles, and data files.
+# incus-box install script
+# Installs incus-box scripts, profiles, and data files.
 # Supports both system-wide (/usr/local) and user (~/.local) installs.
 # shellcheck disable=SC2015
 
@@ -22,7 +22,7 @@ die()  { printf 'Error: %s\n' "$*" >&2; exit 1; }
 
 show_help() {
     cat <<EOF
-incusbox installer version: ${version}
+incus-box installer version: ${version}
 
 Usage:
   ./install [OPTIONS]
@@ -38,7 +38,7 @@ Options:
 Examples:
   sudo ./install                    # system-wide install to /usr/local
   ./install --user                  # user install to ~/.local
-  ./install --prefix /opt/incusbox  # custom prefix
+  ./install --prefix /opt/incus-box  # custom prefix
   sudo ./install --update           # update an existing installation
 EOF
 }
@@ -65,13 +65,13 @@ if [ -z "${prefix}" ]; then
 fi
 
 bin_dir="${prefix}/bin"
-share_dir="${prefix}/share/incusbox"
+share_dir="${prefix}/share/incus-box"
 profiles_dir="${share_dir}/profiles"
 
 # Source directory (where this install script lives)
 src_dir="$(cd "$(dirname "$0")" && pwd)"
 
-log "Installing incusbox ${version} to ${prefix}"
+log "Installing incus-box ${version} to ${prefix}"
 
 # ── create directories ────────────────────────────────────────────────────────
 install -d "${bin_dir}"
@@ -81,36 +81,36 @@ info "Created directories"
 
 # ── install executables ───────────────────────────────────────────────────────
 executables="
-incusbox
-incusbox-create
-incusbox-enter
-incusbox-init
-incusbox-export
-incusbox-host-exec
-incusbox-list
-incusbox-rm
-incusbox-stop
-incusbox-upgrade
-incusbox-snapshot
-incusbox-snapshot-auto
-incusbox-console
-incusbox-backup
-incusbox-backup-list
-incusbox-backup-delete
-incusbox-restore
-incusbox-publish
-incusbox-import
-incusbox-fleet
-incusbox-monitor
-incusbox-net
-incusbox-usb
-incusbox-gpu
-incusbox-cloud-sync
-incusbox-template
-incusbox-talos
-incusbox-assemble
-incusbox-update
-incusbox-setup-rootless
+incus-box
+incus-box-create
+incus-box-enter
+incus-box-init
+incus-box-export
+incus-box-host-exec
+incus-box-list
+incus-box-rm
+incus-box-stop
+incus-box-upgrade
+incus-box-snapshot
+incus-box-snapshot-auto
+incus-box-console
+incus-box-backup
+incus-box-backup-list
+incus-box-backup-delete
+incus-box-restore
+incus-box-publish
+incus-box-import
+incus-box-fleet
+incus-box-monitor
+incus-box-net
+incus-box-usb
+incus-box-gpu
+incus-box-cloud-sync
+incus-box-template
+incus-box-talos
+incus-box-assemble
+incus-box-update
+incus-box-setup-rootless
 "
 
 # lib.sh is sourced by all scripts at runtime; install to both bin_dir
@@ -134,6 +134,11 @@ for exe in ${executables}; do
     fi
 done
 
+# Backward-compatibility symlink: incusbox → incus-box
+# Allows existing scripts and aliases to continue working after the rename.
+ln -sf "${bin_dir}/incus-box" "${bin_dir}/incusbox" 2>/dev/null || true
+info "Installed compat symlink: incusbox → incus-box"
+
 # ── install shell completions ─────────────────────────────────────────────────
 bash_completion_dir=""
 zsh_completion_dir=""
@@ -146,18 +151,18 @@ else
     zsh_completion_dir="${prefix}/share/zsh/site-functions"
 fi
 
-if [ -f "${src_dir}/completions/incusbox.bash" ]; then
+if [ -f "${src_dir}/completions/incus-box.bash" ]; then
     install -d "${bash_completion_dir}"
-    install -m 0644 "${src_dir}/completions/incusbox.bash" \
-        "${bash_completion_dir}/incusbox"
-    info "Installed bash completion: ${bash_completion_dir}/incusbox"
+    install -m 0644 "${src_dir}/completions/incus-box.bash" \
+        "${bash_completion_dir}/incus-box"
+    info "Installed bash completion: ${bash_completion_dir}/incus-box"
 fi
 
-if [ -f "${src_dir}/completions/incusbox.zsh" ]; then
+if [ -f "${src_dir}/completions/incus-box.zsh" ]; then
     install -d "${zsh_completion_dir}"
-    install -m 0644 "${src_dir}/completions/incusbox.zsh" \
-        "${zsh_completion_dir}/_incusbox"
-    info "Installed zsh completion: ${zsh_completion_dir}/_incusbox"
+    install -m 0644 "${src_dir}/completions/incus-box.zsh" \
+        "${zsh_completion_dir}/_incus-box"
+    info "Installed zsh completion: ${zsh_completion_dir}/_incus-box"
 fi
 
 # ── install man pages ────────────────────────────────────────────────────────
@@ -176,10 +181,10 @@ if [ -d "${src_dir}/man" ]; then
 fi
 
 # ── install data files ────────────────────────────────────────────────────────
-# incusbox-init is also installed to share_dir so incusbox-create can find it
+# incus-box-init is also installed to share_dir so incus-box-create can find it
 # when generating cloud-init user-data (the path may differ from bin_dir).
-install -m 0755 "${src_dir}/incusbox-init" "${share_dir}/incusbox-init"
-info "Installed ${share_dir}/incusbox-init"
+install -m 0755 "${src_dir}/incus-box-init" "${share_dir}/incus-box-init"
+info "Installed ${share_dir}/incus-box-init"
 
 # lib.sh is already installed above; the share_dir copy is the fallback used
 # when scripts are invoked from a PATH location other than their source dir.
@@ -222,7 +227,7 @@ if command -v incus >/dev/null 2>&1; then
     done
 else
     log "Note: 'incus' not found — profiles not registered. Run manually:"
-    log "  incus profile create incusbox-base < ${profiles_dir}/incusbox-base.yaml"
+    log "  incus profile create incus-box-base < ${profiles_dir}/incus-box-base.yaml"
 fi
 
 # ── register OCI remotes ──────────────────────────────────────────────────────
@@ -263,8 +268,8 @@ if [ "${user_install}" -eq 1 ]; then
 fi
 
 log ""
-log "incusbox ${version} installed successfully."
+log "incus-box ${version} installed successfully."
 log ""
 log "Quick start:"
-log "  incusbox create --image docker:ubuntu:22.04 --name mybox"
-log "  incusbox enter mybox"
+log "  incus-box create --image docker:ubuntu:22.04 --name mybox"
+log "  incus-box enter mybox"
