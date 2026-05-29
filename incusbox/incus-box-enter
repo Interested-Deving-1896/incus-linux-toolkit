@@ -1,0 +1,291 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incus-box-enter: enter a running incus-box container
+# Replaces distrobox-enter; uses incus exec instead of docker/podman exec.
+# shellcheck disable=SC2034,SC2015,SC2016
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incus-box/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+# ── defaults ──────────────────────────────────────────────────────────────────
+container_name=""
+container_image_default="images:ubuntu/24.04/cloud"
+container_command_user="${USER}"
+headless=0
+non_interactive=0
+dryrun=0
+verbose=0
+rootful=0
+version="0.1.0"
+# Timeout in seconds to wait for cloud-init / incus-box-init to complete
+init_timeout=120
+
+# (config loading and helpers provided by lib.sh)
+
+show_help() {
+    cat <<EOF
+incus-box version: ${version}
+
+Usage:
+  incus-box enter [OPTIONS] NAME [-- COMMAND [ARGS...]]
+
+Options:
+  -u, --user USER    Run as USER inside the container (default: ${USER})
+  -H, --headless     Do not allocate a TTY (non-interactive exec)
+  -r, --root         Use rootful incus
+  -Y, --yes          Non-interactive (auto-create if missing)
+  -d, --dry-run      Print commands without executing
+  -v, --verbose      Show verbose output
+  -V, --version      Show version
+  -h, --help         Show this help
+
+Examples:
+  incus-box enter mybox
+  incus-box enter mybox -- bash -c 'echo hello'
+  incus-box enter --headless mybox -- ls /
+EOF
+}
+
+# ── argument parsing ──────────────────────────────────────────────────────────
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -u|--user)    container_command_user="$2"; shift 2 ;;
+        -H|--headless) headless=1;                shift ;;
+        -r|--root)    rootful=1;                  shift ;;
+        -Y|--yes)     non_interactive=1;          shift ;;
+        -d|--dry-run) dryrun=1;                   shift ;;
+        -v|--verbose) verbose=1;                  shift ;;
+        -V|--version) printf '%s\n' "${version}"; exit 0 ;;
+        -h|--help)    show_help; exit 0 ;;
+        --) shift; break ;;
+        -*) die "Unknown option: $1" ;;
+        *)  [ -z "${container_name}" ] && container_name="$1" || break; shift ;;
+    esac
+done
+
+[ -z "${container_name}" ] && die "Container name required. Usage: incus-box enter NAME"
+
+# ── incus binary (rootful vs rootless) ───────────────────────────────────────
+resolve_incus
+
+# ── container state helpers ───────────────────────────────────────────────────
+container_status() {
+    ${INCUS} info "${container_name}" 2>/dev/null \
+        | awk '/^Status:/ {print tolower($2)}'
+}
+
+container_exists() {
+    ${INCUS} info "${container_name}" >/dev/null 2>&1
+}
+
+# Read a user.incus-box.* config key from the container
+container_config() {
+    ${INCUS} config get "${container_name}" "user.incus-box.$1" 2>/dev/null || true
+}
+
+# ── readiness wait ────────────────────────────────────────────────────────────
+# Waits for incus-box-init to write /run/incus-box-ready.
+#
+# Two injection paths exist:
+#   cloud-init  (user.incus-box.init=1) — incus-box-init runs asynchronously via
+#               cloud-init runcmd; we poll /run/incus-box-ready and use
+#               cloud-init status as a secondary signal.
+#   exec-inject (user.incus-box.init=0) — incus-box-init was run synchronously
+#               before enter was called; /run/incus-box-ready should already
+#               exist. The cloud-init fallback is skipped entirely to avoid
+#               misleading warnings on containers that don't have cloud-init.
+wait_for_ready() {
+    local elapsed=0
+    local interval=2
+
+    # Determine injection path from container metadata
+    local uses_cloudinit
+    uses_cloudinit="$(${INCUS} config get "${container_name}" \
+        user.incus-box.init 2>/dev/null || true)"
+
+    printf >&2 '%-40s\t' "Waiting for container setup..."
+
+    while [ "${elapsed}" -lt "${init_timeout}" ]; do
+        # Check container hasn't crashed
+        local status
+        status="$(container_status)"
+        if [ "${status}" != "running" ]; then
+            printf >&2 '\n'
+            log "Container stopped unexpectedly (status: ${status})"
+            ${INCUS} info --show-log "${container_name}" >&2 || true
+            die "Container setup failed"
+        fi
+
+        # Primary signal: /run/incus-box-ready written by incus-box-init
+        if ${INCUS} exec "${container_name}" -- \
+            test -f /run/incus-box-ready >/dev/null 2>&1; then
+            printf >&2 '\033[32m[ OK ]\033[0m\n'
+            return 0
+        fi
+
+        # Secondary: cloud-init status — only for cloud-init injection path.
+        # Skipped for exec-injection containers (no cloud-init installed).
+        if [ "${uses_cloudinit}" = "1" ]; then
+            local ci_status
+            ci_status="$(${INCUS} exec "${container_name}" -- \
+                cloud-init status 2>/dev/null | awk '{print $NF}' || true)"
+            case "${ci_status}" in
+                error)
+                    printf >&2 '\n'
+                    ${INCUS} exec "${container_name}" -- \
+                        cloud-init status --long >&2 2>/dev/null || true
+                    die "cloud-init reported an error" ;;
+                done)
+                    # cloud-init finished but no ready file — incus-box-init failed
+                    printf >&2 '\n'
+                    log "cloud-init finished but /run/incus-box-ready not found"
+                    log "Check: incus exec ${container_name} -- journalctl -u cloud-final"
+                    return 0 ;;
+            esac
+        fi
+
+        sleep "${interval}"
+        elapsed=$((elapsed + interval))
+        printf >&2 '.'
+    done
+
+    printf >&2 '\n'
+    if [ "${uses_cloudinit}" = "1" ]; then
+        log "Warning: timed out waiting for container setup (${init_timeout}s)"
+        log "Check: incus exec ${container_name} -- cloud-init status"
+    else
+        log "Warning: timed out waiting for /run/incus-box-ready (${init_timeout}s)"
+        log "Check: incus exec ${container_name} -- ls /run/incus-box-ready"
+    fi
+}
+
+# ── start container if needed ─────────────────────────────────────────────────
+ensure_running() {
+    local status
+    status="$(container_status)"
+
+    case "${status}" in
+        running)
+            return 0 ;;
+        stopped|frozen)
+            info "Starting container ${container_name}..."
+            ${INCUS} start "${container_name}" || die "Failed to start container"
+            wait_for_ready ;;
+        "")
+            # Container doesn't exist — offer to create it
+            if [ "${non_interactive}" -eq 1 ]; then
+                local create_cmd
+                create_cmd="$(dirname "$0")/incus-box-create"
+                [ -x "${create_cmd}" ] || create_cmd="incus-box-create"
+                ${create_cmd} --yes --name "${container_name}" \
+                    --image "${container_image_default}" \
+                    ${rootful:+--root}
+                wait_for_ready
+            else
+                printf >&2 "Container '%s' not found.\n" "${container_name}"
+                printf >&2 "Create it now? [Y/n]: "
+                read -r response
+                response="${response:-Y}"
+                case "${response}" in
+                    y|Y|yes|Yes|YES)
+                        local create_cmd
+                        create_cmd="$(dirname "$0")/incus-box-create"
+                        [ -x "${create_cmd}" ] || create_cmd="incus-box-create"
+                        ${create_cmd} --name "${container_name}" \
+                            --image "${container_image_default}" \
+                            ${rootful:+--root}
+                        wait_for_ready ;;
+                    *)
+                        die "Aborted. Create the container first: incus-box create --name ${container_name}" ;;
+                esac
+            fi ;;
+        *)
+            die "Container is in unexpected state: ${status}" ;;
+    esac
+}
+
+# ── build exec command ────────────────────────────────────────────────────────
+# Called after container metadata has been read into:
+#   container_home, container_user_uid, container_user_gid
+build_exec_cmd() {
+    local exec_args=""
+
+    # TTY allocation
+    if [ "${headless}" -eq 0 ] && [ -t 0 ]; then
+        exec_args="--force-interactive"
+    else
+        exec_args="--force-noninteractive"
+    fi
+
+    # Run as the correct user — metadata vars are populated before this call
+    exec_args="${exec_args} --user ${container_user_uid}"
+    exec_args="${exec_args} --group ${container_user_gid}"
+    exec_args="${exec_args} --cwd ${container_home}"
+
+    # Environment
+    exec_args="${exec_args} --env HOME=${container_home}"
+    exec_args="${exec_args} --env SHELL=$(basename "${SHELL:-/bin/bash}")"
+    exec_args="${exec_args} --env CONTAINER_ID=${container_name}"
+    exec_args="${exec_args} --env INCUSBOX=1"
+
+    printf '%s' "${exec_args}"
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+main() {
+    require_incus
+
+    # Read container metadata first so --dry-run and build_exec_cmd both have
+    # correct values regardless of whether the container is running.
+    # Fall back to host values when the container doesn't exist yet.
+    container_home="$(container_config container_home 2>/dev/null || true)"
+    container_user_uid="$(container_config host_uid 2>/dev/null || true)"
+    container_user_gid="$(container_config host_gid 2>/dev/null || true)"
+    unshare_groups="$(container_config unshare_groups 2>/dev/null || true)"
+
+    [ -z "${container_home}" ]     && container_home="${HOME}"
+    [ -z "${container_user_uid}" ] && container_user_uid="$(id -ru)"
+    [ -z "${container_user_gid}" ] && container_user_gid="$(id -rg)"
+
+    # Build exec args now that metadata is populated
+    local exec_args
+    exec_args="$(build_exec_cmd)"
+
+    # Determine the inner command (login shell if none given)
+    # Done before ensure_running so --dry-run can print the full command
+    # without needing a live container.
+    local inner_cmd=""
+    if [ "$#" -eq 0 ]; then
+        # Best-effort: read shell from container if running, else use host shell
+        inner_cmd="$(${INCUS} exec "${container_name}" -- \
+            getent passwd "${container_command_user}" 2>/dev/null \
+            | cut -d: -f7 || true)"
+        [ -z "${inner_cmd}" ] && inner_cmd="${SHELL:-/bin/bash}"
+        set -- "${inner_cmd}" -l
+    fi
+
+    # If unsharing groups, wrap in su to drop supplementary groups
+    if [ "${unshare_groups}" = "1" ]; then
+        set -- su -m "${container_command_user}" -s /bin/sh -c '"$0" "$@"' -- "$@"
+    fi
+
+    # --dry-run: print the full command and exit without touching the container
+    if [ "${dryrun}" -eq 1 ]; then
+        log "[dry-run] ${INCUS} exec ${exec_args} ${container_name} -- $*"
+        exit 0
+    fi
+
+    # Ensure container is running (starts it or creates it if needed)
+    ensure_running
+
+    # Execute — use exec to replace this shell process
+    # shellcheck disable=SC2086
+    exec ${INCUS} exec ${exec_args} "${container_name}" -- "$@"
+}
+
+main "$@"
