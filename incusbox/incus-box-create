@@ -1,0 +1,765 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incus-box-create: create an incus-box container backed by Incus
+# Replaces distrobox-create; uses incus launch + cloud-init instead of
+# docker/podman run.
+# shellcheck disable=SC2034,SC2015,SC2086
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incus-box/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+# ── defaults ────────────────────────────────────────────────────────────────
+container_image=""
+container_image_default="images:ubuntu/24.04/cloud"
+container_name=""
+container_name_default="my-incus-box"
+# shellcheck disable=SC2034
+container_hostname="$(uname -n)"
+container_user_home="${HOME}"
+container_user_name="${USER}"
+container_user_uid="$(id -ru)"
+container_user_gid="$(id -rg)"
+container_home_prefix=""
+container_user_custom_home=""
+container_additional_packages=""
+container_init_hook=""
+container_pre_init_hook=""
+container_manager_additional_flags=""
+container_additional_volumes=""
+
+storage_pool=""          # auto-detected if empty
+storage_driver=""        # zfs | btrfs | dir  (detected from pool)
+storage_dataset=""       # ZFS dataset prefix (e.g. tank/incus-box)
+btrfs_compress="zstd"    # compression algo for btrfs subvolumes
+
+template=""
+init=0
+nvidia=0
+rootful=0
+unshare_netns=0
+unshare_ipc=0
+unshare_process=0
+unshare_devsys=0
+unshare_groups=0
+non_interactive=0
+dryrun=0
+verbose=0
+# shellcheck disable=SC2034
+always_pull=0
+# shellcheck disable=SC2034
+nopasswd=0
+version="0.1.0"
+
+# (config loading and helpers provided by lib.sh)
+
+show_help() {
+    cat <<EOF
+incus-box version: ${version}
+
+Usage:
+  incus-box create [OPTIONS] [NAME]
+
+Options:
+      --template NAME        Apply a named template (sets image, cpu, memory defaults)
+  -i, --image IMAGE          Image to use (OCI or Incus). Default: ${container_image_default}
+  -n, --name NAME            Container name. Default: ${container_name_default}
+      --hostname HOST        Hostname inside container. Default: host hostname
+  -H, --home PATH            Custom HOME directory inside container
+      --home-prefix PREFIX   Prefix for per-container home dirs
+      --volume SRC:DST[:OPT] Additional bind mount (repeatable)
+  -a, --additional-flags F   Extra flags passed to incus launch
+      --additional-packages P Packages to install at init time
+      --init-hooks CMD       Commands run at end of container init
+      --pre-init-hooks CMD   Commands run at start of container init
+  -I, --init                 Use init system (systemd) inside container
+      --nvidia               Enable NVIDIA GPU passthrough
+      --storage-pool POOL    Incus storage pool to use
+      --storage-dataset DS   ZFS dataset prefix (e.g. tank/incus-box)
+      --btrfs-compress ALGO  Btrfs compression: zstd|lzo|zlib (default: zstd)
+  -r, --root                 Run as root (rootful container)
+      --unshare-netns        Do not share host network namespace
+      --unshare-ipc          Do not share host IPC namespace
+      --unshare-process      Do not share host PID namespace
+      --unshare-devsys       Do not share /dev and /sys
+      --unshare-groups       Do not forward supplementary groups
+      --unshare-all          Enable all unshare flags
+  -p, --pull                 Always pull image even if cached
+  -Y, --yes                  Non-interactive
+  -d, --dry-run              Print commands without executing
+  -v, --verbose              Show verbose output
+  -V, --version              Show version
+  -h, --help                 Show this help
+EOF
+}
+
+# ── argument parsing ──────────────────────────────────────────────────────────
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --template)            template="$2";                     shift 2 ;;
+        -i|--image)            container_image="$2";              shift 2 ;;
+        -n|--name)             container_name="$2";               shift 2 ;;
+        --hostname)            container_hostname="$2";           shift 2 ;;
+        -H|--home)             container_user_custom_home="$2";   shift 2 ;;
+        --home-prefix)         container_home_prefix="$2";        shift 2 ;;
+        --volume)              container_additional_volumes="${container_additional_volumes} $2"; shift 2 ;;
+        -a|--additional-flags) container_manager_additional_flags="${container_manager_additional_flags} $2"; shift 2 ;;
+        --additional-packages) container_additional_packages="$2"; shift 2 ;;
+        --init-hooks)          container_init_hook="$2";          shift 2 ;;
+        --pre-init-hooks)      container_pre_init_hook="$2";      shift 2 ;;
+        -I|--init)             init=1;                            shift ;;
+        --nvidia)              nvidia=1;                          shift ;;
+        --storage-pool)        storage_pool="$2";                 shift 2 ;;
+        --storage-dataset)     storage_dataset="$2";              shift 2 ;;
+        --btrfs-compress)      btrfs_compress="$2";               shift 2 ;;
+        -r|--root)             rootful=1;                         shift ;;
+        --unshare-netns)       unshare_netns=1;                   shift ;;
+        --unshare-ipc)         unshare_ipc=1;                     shift ;;
+        --unshare-process)     unshare_process=1;                 shift ;;
+        --unshare-devsys)      unshare_devsys=1;                  shift ;;
+        --unshare-groups)      unshare_groups=1;                  shift ;;
+        --unshare-all)         unshare_netns=1; unshare_ipc=1; unshare_process=1; unshare_devsys=1; unshare_groups=1; shift ;;
+        -p|--pull)             always_pull=1; non_interactive=1;  shift ;;
+        -Y|--yes)              non_interactive=1;                 shift ;;
+        -d|--dry-run)          dryrun=1;                          shift ;;
+        -v|--verbose)          verbose=1;                         shift ;;
+        -V|--version)          printf '%s\n' "${version}"; exit 0 ;;
+        -h|--help)             show_help; exit 0 ;;
+        --) shift; break ;;
+        -*) die "Unknown option: $1" ;;
+        *)  container_name="$1"; shift ;;
+    esac
+done
+
+# ── template application (before defaults, so CLI flags override) ─────────────
+if [ -n "${template}" ]; then
+    _script_dir="$(cd "$(dirname "$0")" && pwd)"
+    _tpl_dir="${INCUSBOX_TEMPLATES_DIR:-}"
+    [ -z "${_tpl_dir}" ] && _tpl_dir="${_script_dir}/templates"
+    [ -d "${_tpl_dir}" ] || _tpl_dir="/usr/share/incus-box/templates"
+    _tpl_file="${_tpl_dir}/${template}.yaml"
+    [ -f "${_tpl_file}" ] || die "Template not found: ${template} (looked in ${_tpl_dir})"
+
+    _tpl_get() { grep "^${1}:" "${_tpl_file}" | head -1 | sed "s/^${1}:[[:space:]]*//" | tr -d '"'; }
+    _tpl_nested() {
+        local _sec="$1" _key="$2" _in=false _v=""
+        while IFS= read -r _l; do
+            printf '%s\n' "${_l}" | grep -q "^${_sec}:" && { _in=true; continue; }
+            ${_in} && printf '%s\n' "${_l}" | grep -qE "^[a-z]" && break
+            if ${_in}; then
+                local _t; _t=$(printf '%s\n' "${_l}" | sed 's/^[[:space:]]*//')
+                printf '%s\n' "${_t}" | grep -q "^${_key}:" && {
+                    _v=$(printf '%s\n' "${_t}" | sed "s/^${_key}:[[:space:]]*//" | tr -d '"'); break; }
+            fi
+        done < "${_tpl_file}"
+        printf '%s' "${_v}"
+    }
+
+    _tpl_image=$(_tpl_get "image")
+    _tpl_cpu=$(_tpl_nested "resources" "cpu")
+    _tpl_mem=$(_tpl_nested "resources" "memory")
+    _tpl_init=$(_tpl_get "init")
+    _tpl_nvidia=$(_tpl_get "nvidia")
+    _tpl_unshare_netns=$(_tpl_get "unshare_netns")
+
+    # Apply only if the user hasn't already set the value via CLI flag
+    [ -z "${container_image}" ] && [ -n "${_tpl_image}" ]       && container_image="${_tpl_image}"
+    [ -n "${_tpl_cpu}" ]   && container_manager_additional_flags="${container_manager_additional_flags} --config limits.cpu=${_tpl_cpu}"
+    [ -n "${_tpl_mem}" ]   && container_manager_additional_flags="${container_manager_additional_flags} --config limits.memory=${_tpl_mem}"
+    [ "${_tpl_init}" = "true" ]           && init=1
+    [ "${_tpl_nvidia}" = "true" ]         && nvidia=1
+    [ "${_tpl_unshare_netns}" = "true" ]  && unshare_netns=1
+
+    log "Applying template '${template}'"
+fi
+
+[ -z "${container_image}" ] && container_image="${container_image_default}"
+[ -z "${container_name}" ]  && container_name="${container_name_default}"
+
+# custom home prefix → per-container home
+if [ -n "${container_home_prefix}" ] && [ -z "${container_user_custom_home}" ]; then
+    container_user_custom_home="${container_home_prefix}/${container_name}"
+fi
+effective_home="${container_user_custom_home:-"${container_user_home}"}"
+
+# ── incus binary (rootful vs rootless) ───────────────────────────────────────
+resolve_incus
+
+# ── storage detection ─────────────────────────────────────────────────────────
+# Determine which Incus storage pool to use and what driver it runs on.
+# Priority: --storage-pool flag > default pool > first available pool.
+detect_storage() {
+    if [ -z "${storage_pool}" ]; then
+        # Try to find the default pool (marked with DEFAULT in incus storage list)
+        storage_pool="$(${INCUS} storage list --format csv 2>/dev/null \
+            | awk -F',' 'NR>0 {print $1; exit}')"
+    fi
+    [ -z "${storage_pool}" ] && die "No Incus storage pool found. Run 'incus storage create' first."
+
+    storage_driver="$(${INCUS} storage show "${storage_pool}" 2>/dev/null \
+        | awk '/^driver:/ {print $2}')"
+    info "Storage pool: ${storage_pool} (driver: ${storage_driver})"
+}
+
+# For ZFS: optionally create a dedicated dataset for this container's home.
+# Incus manages the container rootfs dataset itself; we only create a dataset
+# for the bind-mounted home if --storage-dataset is set.
+setup_zfs_home() {
+    [ -z "${storage_dataset}" ] && return 0
+    local ds="${storage_dataset}/${container_name}/home"
+    if ! zfs list "${ds}" >/dev/null 2>&1; then
+        info "Creating ZFS dataset ${ds}"
+        if [ "${dryrun}" -eq 0 ]; then
+            zfs create \
+                -o compression=zstd \
+                -o atime=off \
+                -o mountpoint="${effective_home}" \
+                "${ds}" || die "Failed to create ZFS dataset ${ds}"
+        else
+            log "[dry-run] zfs create -o compression=zstd -o atime=off -o mountpoint=${effective_home} ${ds}"
+        fi
+    fi
+}
+
+# For Btrfs: create a subvolume for the container home if the home path lives
+# on a btrfs filesystem.
+setup_btrfs_home() {
+    local home_fs
+    home_fs="$(stat -f -c '%T' "${effective_home}" 2>/dev/null || true)"
+    [ "${home_fs}" = "btrfs" ] || return 0
+
+    # If effective_home is already a subvolume, nothing to do.
+    btrfs subvolume show "${effective_home}" >/dev/null 2>&1 && return 0
+
+    # Create a subvolume at the home path.
+    local parent
+    parent="$(dirname "${effective_home}")"
+    local subvol_name
+    subvol_name="$(basename "${effective_home}")"
+
+    info "Creating Btrfs subvolume ${effective_home} (compress=${btrfs_compress})"
+    if [ "${dryrun}" -eq 0 ]; then
+        mkdir -p "${parent}"
+        btrfs subvolume create "${effective_home}" \
+            || die "Failed to create Btrfs subvolume ${effective_home}"
+        # Set compression property on the subvolume
+        btrfs property set "${effective_home}" compression "${btrfs_compress}" 2>/dev/null || true
+    else
+        log "[dry-run] btrfs subvolume create ${effective_home}"
+        log "[dry-run] btrfs property set ${effective_home} compression ${btrfs_compress}"
+    fi
+}
+
+# ── OCI remote registration ───────────────────────────────────────────────────
+# If the image looks like an OCI reference (contains a registry hostname or
+# docker.io shorthand), ensure the OCI remote is registered with Incus.
+#
+# Incus native remotes (images:, ubuntu:, ubuntu-daily:, local:) are NOT OCI.
+# OCI references are either explicit docker:/ghcr:/quay: prefixes, or
+# registry hostnames containing a dot (e.g. docker.io/..., ghcr.io/...).
+is_oci_image() {
+    case "${container_image}" in
+        # Explicit Incus native remotes — never OCI
+        images:*|ubuntu:*|ubuntu-daily:*|local:*|tumbleweed:*)
+            return 1 ;;
+        # Explicit OCI remote prefixes registered by incus-box
+        docker:*|ghcr:*|quay:*)
+            return 0 ;;
+        # Full registry hostnames (contain a dot before the first slash)
+        docker.io/*|ghcr.io/*|quay.io/*|registry.*)
+            return 0 ;;
+        # Generic: hostname with dot followed by path (e.g. registry.example.com/img)
+        *.*/*:*)
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+ensure_oci_remote() {
+    local registry
+    case "${container_image}" in
+        docker:*)
+            registry="docker.io"
+            container_image="docker:${container_image#docker:}" ;;
+        docker.io/*)
+            registry="docker.io"
+            container_image="docker:${container_image#docker.io/}" ;;
+        ghcr.io/*)
+            registry="ghcr.io"
+            container_image="ghcr:${container_image#ghcr.io/}" ;;
+        quay.io/*)
+            registry="quay.io"
+            container_image="quay:${container_image#quay.io/}" ;;
+        registry.fedoraproject.org/*)
+            registry="registry.fedoraproject.org"
+            container_image="fedora-registry:${container_image#registry.fedoraproject.org/}" ;;
+        *)
+            # Generic: split on first /
+            registry="${container_image%%/*}"
+            local remote_name
+            remote_name="$(printf '%s' "${registry}" | tr '.' '-' | tr ':' '-')"
+            container_image="${remote_name}:${container_image#*/}" ;;
+    esac
+
+    local remote_name="${container_image%%:*}"
+    if ! ${INCUS} remote list --format csv 2>/dev/null | grep -q "^${remote_name},"; then
+        info "Registering OCI remote ${remote_name} → https://${registry}"
+        if [ "${dryrun}" -eq 0 ]; then
+            ${INCUS} remote add "${remote_name}" "https://${registry}" \
+                --protocol=oci --accept-certificate 2>/dev/null || true
+        else
+            log "[dry-run] incus remote add ${remote_name} https://${registry} --protocol=oci"
+        fi
+    fi
+}
+
+# ── profile selection ─────────────────────────────────────────────────────────
+# Build the list of Incus profiles to apply to this container.
+# Profiles live in profiles/ and are applied in order.
+build_profile_list() {
+    local profiles="incus-box-base"
+    # Rootless containers get the rootless profile (AppArmor unconfined +
+    # fuse-overlayfs) instead of the base profile's defaults.
+    if [ -n "${INCUS_SOCKET}" ] && [ "${rootful}" -eq 0 ]; then
+        profiles="incus-box-rootless"
+    fi
+    [ "${init}" -eq 1 ]          && profiles="${profiles},incus-box-init"
+    [ "${nvidia}" -eq 1 ]        && profiles="${profiles},incus-box-nvidia"
+    [ "${unshare_netns}" -eq 1 ] && profiles="${profiles},incus-box-unshare-net"
+    printf '%s' "${profiles}"
+}
+
+# Ensure required profiles exist in Incus; create from bundled YAML if missing.
+ensure_profiles() {
+    local profile_dir
+    profile_dir="$(cd "$(dirname "$0")" && pwd)/profiles"
+    [ -d "${profile_dir}" ] || profile_dir="/usr/share/incus-box/profiles"
+
+    for profile in incus-box-base incus-box-init incus-box-nvidia incus-box-unshare-net; do
+        if ! ${INCUS} profile show "${profile}" >/dev/null 2>&1; then
+            local yaml="${profile_dir}/${profile}.yaml"
+            if [ -f "${yaml}" ]; then
+                info "Creating Incus profile ${profile}"
+                [ "${dryrun}" -eq 0 ] && ${INCUS} profile create "${profile}" < "${yaml}"
+            fi
+        fi
+    done
+}
+
+# ── cloud-init user-data generation ──────────────────────────────────────────
+# Generates the cloud-init user-data that replaces distrobox-init.
+# This runs inside the container on first boot and:
+#   1. Creates the matching user with correct UID/GID
+#   2. Installs sudo/doas with NOPASSWD
+#   3. Installs additional packages
+#   4. Runs pre/post init hooks
+#   5. Writes /run/incus-box-ready as a readiness signal
+generate_cloud_init() {
+    local init_script_path
+    init_script_path="$(cd "$(dirname "$0")" && pwd)/incus-box-init"
+    [ -f "${init_script_path}" ] || init_script_path="/usr/share/incus-box/incus-box-init"
+
+    # Encode the incus-box-init script as base64 for embedding in cloud-init
+    local init_b64=""
+    if [ -f "${init_script_path}" ]; then
+        init_b64="$(base64 < "${init_script_path}" | tr -d '\n')"
+    fi
+
+    cat <<CLOUDINIT
+#cloud-config
+# Generated by incus-box-create for container: ${container_name}
+
+users:
+  - name: ${container_user_name}
+    uid: ${container_user_uid}
+    gid: ${container_user_gid}
+    shell: ${SHELL}
+    home: ${effective_home}
+    no_create_home: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: [sudo, wheel, adm]
+
+write_files:
+  - path: /usr/local/bin/incus-box-init
+    permissions: '0755'
+    encoding: b64
+    content: ${init_b64}
+  - path: /etc/incus-box-container
+    permissions: '0644'
+    content: |
+      INCUSBOX_CONTAINER_NAME=${container_name}
+      INCUSBOX_HOST_USER=${container_user_name}
+      INCUSBOX_HOST_UID=${container_user_uid}
+      INCUSBOX_HOST_GID=${container_user_gid}
+      INCUSBOX_HOST_HOME=${container_user_home}
+      INCUSBOX_CONTAINER_HOME=${effective_home}
+      INCUSBOX_ADDITIONAL_PACKAGES=${container_additional_packages}
+      INCUSBOX_PRE_INIT_HOOK=${container_pre_init_hook}
+      INCUSBOX_INIT_HOOK=${container_init_hook}
+      INCUSBOX_INIT=${init}
+      INCUSBOX_NVIDIA=${nvidia}
+
+runcmd:
+  - /usr/local/bin/incus-box-init
+CLOUDINIT
+}
+
+# ── device configuration ──────────────────────────────────────────────────────
+# After the container is created, add bind-mount devices via incus config device add.
+configure_devices() {
+    local name="$1"
+
+    # /tmp — shared with host for X11 sockets, etc.
+    ${INCUS} config device add "${name}" tmp disk \
+        source=/tmp path=/tmp 2>/dev/null || true
+
+    # Host root at /run/host — for distrobox-host-exec
+    ${INCUS} config device add "${name}" run-host disk \
+        source=/ path=/run/host \
+        readonly=true 2>/dev/null || true
+
+    # User home
+    if [ -n "${container_user_custom_home}" ]; then
+        mkdir -p "${container_user_custom_home}"
+        ${INCUS} config device add "${name}" custom-home disk \
+            source="${container_user_custom_home}" \
+            path="${container_user_custom_home}" 2>/dev/null || true
+        # Also mount original home as INCUSBOX_HOST_HOME
+        ${INCUS} config device add "${name}" host-home disk \
+            source="${container_user_home}" \
+            path="${container_user_home}" \
+            readonly=false 2>/dev/null || true
+    else
+        ${INCUS} config device add "${name}" home disk \
+            source="${container_user_home}" \
+            path="${container_user_home}" 2>/dev/null || true
+    fi
+
+    # XDG_RUNTIME_DIR — Wayland/PipeWire sockets
+    local xdg_runtime="/run/user/${container_user_uid}"
+    if [ -d "${xdg_runtime}" ] && [ "${init}" -eq 0 ]; then
+        ${INCUS} config device add "${name}" xdg-runtime disk \
+            source="${xdg_runtime}" \
+            path="${xdg_runtime}" 2>/dev/null || true
+    fi
+
+    # /dev and /sys — unless unshared
+    if [ "${unshare_devsys}" -eq 0 ]; then
+        ${INCUS} config device add "${name}" dev disk \
+            source=/dev path=/dev 2>/dev/null || true
+        ${INCUS} config device add "${name}" sys disk \
+            source=/sys path=/sys 2>/dev/null || true
+    fi
+
+    # Network files — unless unsharing netns
+    if [ "${unshare_netns}" -eq 0 ]; then
+        for netfile in /etc/hosts /etc/resolv.conf /etc/hostname; do
+            [ -e "${netfile}" ] || continue
+            local devname
+            devname="net-$(basename "${netfile}")"
+            ${INCUS} config device add "${name}" "${devname}" disk \
+                source="${netfile}" path="${netfile}" \
+                readonly=true 2>/dev/null || true
+        done
+    fi
+
+    # Additional user-specified volumes
+    for vol in ${container_additional_volumes}; do
+        local src dst opts
+        src="$(printf '%s' "${vol}" | cut -d: -f1)"
+        dst="$(printf '%s' "${vol}" | cut -d: -f2)"
+        opts="$(printf '%s' "${vol}" | cut -d: -f3)"
+        local devname
+        devname="vol-$(printf '%s' "${dst}" | tr '/' '-' | tr -d '-' | cut -c1-20)"
+        local ro_flag=""
+        [ "${opts}" = "ro" ] && ro_flag="readonly=true"
+        # shellcheck disable=SC2086
+        ${INCUS} config device add "${name}" "${devname}" disk \
+            source="${src}" path="${dst}" ${ro_flag} 2>/dev/null || true
+    done
+
+    # distrobox-export and distrobox-host-exec — inject from host
+    local export_path hostexec_path
+    export_path="$(cd "$(dirname "$0")" && pwd)/incus-box-export"
+    hostexec_path="$(cd "$(dirname "$0")" && pwd)/incus-box-host-exec"
+    [ -f "${export_path}" ] && \
+        ${INCUS} config device add "${name}" incus-box-export disk \
+            source="${export_path}" \
+            path=/usr/local/bin/incus-box-export \
+            readonly=true 2>/dev/null || true
+    [ -f "${hostexec_path}" ] && \
+        ${INCUS} config device add "${name}" incus-box-host-exec disk \
+            source="${hostexec_path}" \
+            path=/usr/local/bin/incus-box-host-exec \
+            readonly=true 2>/dev/null || true
+}
+
+# ── distro inference ──────────────────────────────────────────────────────────
+# Derive a distro ID from the image string for use as user.incus-box.distro.
+# This is a best-effort hint; incus-box-init always re-detects inside the container.
+infer_distro() {
+    local img="${1,,}"   # lowercase
+    case "${img}" in
+        *ubuntu*)                        printf 'ubuntu'  ;;
+        *debian*)                        printf 'debian'  ;;
+        *fedora*)                        printf 'fedora'  ;;
+        *centos*|*rhel*|*almalinux*|*rocky*) printf 'fedora' ;;
+        *alpine*)                        printf 'alpine'  ;;
+        *arch*|*manjaro*)                printf 'arch'    ;;
+        *opensuse*|*sles*)               printf 'opensuse' ;;
+        *void*)                          printf 'void'    ;;
+        *)                               printf ''        ;;
+    esac
+}
+
+# ── container config ──────────────────────────────────────────────────────────
+configure_container() {
+    local name="$1"
+
+    # Labels (stored as user.* config keys in Incus)
+    ${INCUS} config set "${name}" \
+        user.manager=incus-box \
+        user.incus-box.host_user="${container_user_name}" \
+        user.incus-box.host_uid="${container_user_uid}" \
+        user.incus-box.host_gid="${container_user_gid}" \
+        user.incus-box.host_home="${container_user_home}" \
+        user.incus-box.container_home="${effective_home}" \
+        user.incus-box.unshare_groups="${unshare_groups}" \
+        user.incus-box.init="${init}" \
+        user.incus-box.nvidia="${nvidia}" \
+        user.incus-box.image="${container_image}" \
+        user.incus-box.distro="$(infer_distro "${container_image}")"
+
+    # Environment variables
+    ${INCUS} config set "${name}" \
+        environment.SHELL="$(basename "${SHELL:-/bin/bash}")" \
+        environment.HOME="${effective_home}" \
+        environment.CONTAINER_ID="${container_name}" \
+        environment.TERMINFO_DIRS="/usr/share/terminfo:/run/host/usr/share/terminfo"
+
+    # Kernel modules
+    ${INCUS} config set "${name}" \
+        "linux.kernel_modules=overlay,nf_nat,ip_tables,ip6_tables,netlink_diag,br_netfilter,xt_conntrack"
+
+    # ── raw.lxc — build all directives in one string, set in one call ─────────
+    # Each directive is conditionally appended. A single incus config set call
+    # is used to avoid the accumulation bug where multiple calls each overwrite
+    # the previous value.
+    local raw_lxc=""
+
+    # Base: drop AppArmor confinement and capability restrictions so the
+    # container can function as a development environment.
+    raw_lxc="lxc.apparmor.profile = unconfined
+lxc.cap.drop =
+lxc.cgroup.devices.allow = a"
+
+    # PID namespace sharing — lets the container see host processes.
+    # Skipped when --unshare-process is set.
+    if [ "${unshare_process}" -eq 0 ]; then
+        raw_lxc="${raw_lxc}
+lxc.namespace.share.pid = 1"
+    fi
+
+    # IPC namespace sharing — shared memory segments with host.
+    # Skipped when --unshare-ipc is set.
+    if [ "${unshare_ipc}" -eq 0 ]; then
+        raw_lxc="${raw_lxc}
+lxc.namespace.share.ipc = 1"
+    fi
+
+    # Host network namespace — container uses host's network stack directly.
+    # When sharing the host network namespace, no NIC device is added to the
+    # container (handled in configure_devices by omitting any NIC device).
+    # lxc.net.0.type = none is only valid when a NIC at index 0 exists to
+    # override; setting it on a container with no NICs causes an error.
+    # The incus-box-unshare-net profile adds a bridged NIC when --unshare-netns
+    # is set, so no raw.lxc directive is needed here in either case.
+
+    # Apply all raw.lxc directives in a single config set call.
+    ${INCUS} config set "${name}" raw.lxc="${raw_lxc}"
+
+    # ── raw.idmap — map host UID/GID into the container ───────────────────────
+    # Without this, bind-mounted home directories appear owned by nobody/nogroup
+    # inside the container for any user whose UID/GID differs from the
+    # container's default mapping. Set per-container so any host user works.
+    ${INCUS} config set "${name}" raw.idmap="uid ${container_user_uid} ${container_user_uid}
+gid ${container_user_gid} ${container_user_gid}"
+
+    # Storage pool assignment
+    if [ -n "${storage_pool}" ]; then
+        ${INCUS} config device override "${name}" root pool="${storage_pool}" 2>/dev/null || true
+    fi
+
+    # ZFS-specific: delegate dataset to container for nested zfs use
+    if [ "${storage_driver}" = "zfs" ]; then
+        ${INCUS} config set "${name}" \
+            security.privileged=false \
+            "volatile.zfs.delegate=true" 2>/dev/null || true
+    fi
+
+    # Btrfs-specific: enable user_subvol_rm_allowed via mount options
+    # (handled at pool level; nothing extra needed per-container)
+
+    # NVIDIA passthrough
+    if [ "${nvidia}" -eq 1 ]; then
+        ${INCUS} config set "${name}" \
+            nvidia.runtime=true \
+            nvidia.driver.capabilities=all 2>/dev/null || true
+    fi
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+main() {
+    # Check incus is available
+    require_incus
+
+    # Register OCI remote if needed — Incus handles OCI pulls natively,
+    # no external tool (skopeo etc.) required.
+    if is_oci_image; then
+        ensure_oci_remote
+    fi
+
+    # Detect storage
+    detect_storage
+
+    # Ensure profiles exist
+    ensure_profiles
+
+    # Check if container already exists
+    if ${INCUS} info "${container_name}" >/dev/null 2>&1; then
+        log "Container '${container_name}' already exists."
+        log "To enter it, run: incus-box enter ${container_name}"
+        exit 0
+    fi
+
+    # Setup storage-specific home directory
+    case "${storage_driver}" in
+        zfs)   setup_zfs_home ;;
+        btrfs) setup_btrfs_home ;;
+    esac
+
+    # Generate cloud-init user-data
+    local cloud_init_file
+    cloud_init_file="$(mktemp /tmp/incus-box-cloud-init-XXXXXX.yaml)"
+    generate_cloud_init > "${cloud_init_file}"
+    info "Cloud-init written to ${cloud_init_file}"
+
+    # Build profile list
+    local profiles
+    profiles="$(build_profile_list)"
+
+    if [ "${dryrun}" -eq 1 ]; then
+        log "[dry-run] incus launch ${container_image} ${container_name} --profile ${profiles}"
+        log "[dry-run] configure_devices ${container_name}"
+        log "[dry-run] configure_container ${container_name}"
+        log "[dry-run] inject_init ${container_name}"
+        rm -f "${cloud_init_file}"
+        exit 0
+    fi
+
+    # Launch
+    printf >&2 "Creating '%s' using image %s ... " "${container_name}" "${container_image}"
+    if ${INCUS} launch "${container_image}" "${container_name}" \
+        --profile "${profiles}" \
+        --config "cloud-init.user-data=$(cat "${cloud_init_file}")" \
+        ${storage_pool:+--storage "${storage_pool}"} \
+        ${container_manager_additional_flags}; then
+        printf >&2 '\033[32m[ OK ]\033[0m\n'
+    else
+        printf >&2 '\033[31m[ ERR ]\033[0m\n'
+        rm -f "${cloud_init_file}"
+        die "Failed to launch container"
+    fi
+
+    rm -f "${cloud_init_file}"
+
+    # Configure devices and settings
+    configure_devices "${container_name}"
+    configure_container "${container_name}"
+
+    # Inject incus-box-init — use cloud-init if available, otherwise fall back
+    # to direct incus exec injection (for Alpine, Arch, minimal images, etc.)
+    inject_init "${container_name}"
+
+    printf >&2 "Container '%s' created.\nTo enter, run:\n\n  incus-box enter %s\n\n" \
+        "${container_name}" "${container_name}"
+}
+
+# ── init injection ────────────────────────────────────────────────────────────
+# Determines whether the container has cloud-init and chooses the injection
+# method accordingly.
+#
+# Method A (cloud-init): cloud-init.user-data was already passed at launch.
+#   We just need to wait — incus-box-enter polls /run/incus-box-ready.
+#
+# Method B (direct exec): For images without cloud-init (Alpine, Arch, minimal
+#   Ubuntu, etc.), copy incus-box-init into the container and run it directly
+#   via incus exec. This is less reliable on first-boot timing but works for
+#   any image.
+inject_init() {
+    local name="$1"
+
+    # Wait briefly for the container to reach running state
+    local attempts=0
+    while [ "${attempts}" -lt 15 ]; do
+        local status
+        status="$(${INCUS} info "${name}" 2>/dev/null | awk '/^Status:/ {print tolower($2)}')"
+        [ "${status}" = "running" ] && break
+        sleep 2
+        attempts=$((attempts + 1))
+    done
+
+    # Detect cloud-init presence inside the container
+    if ${INCUS} exec "${name}" -- \
+        sh -c 'command -v cloud-init >/dev/null 2>&1' 2>/dev/null; then
+        info "cloud-init detected — init will run via cloud-init user-data"
+        # cloud-init.user-data was already set at launch; nothing more to do here.
+        return 0
+    fi
+
+    # Fallback: direct exec injection
+    info "cloud-init not found — using direct exec injection"
+    printf >&2 "%-40s\t" "Injecting incus-box-init..."
+
+    local init_script_path
+    init_script_path="$(cd "$(dirname "$0")" && pwd)/incus-box-init"
+    [ -f "${init_script_path}" ] || init_script_path="/usr/share/incus-box/incus-box-init"
+    [ -f "${init_script_path}" ] || { printf >&2 '\033[31m[ ERR ]\033[0m\n'; die "incus-box-init not found"; }
+
+    # Copy the init script into the container
+    ${INCUS} file push "${init_script_path}" \
+        "${name}/usr/local/bin/incus-box-init" \
+        --mode 0755 2>/dev/null || \
+        die "Failed to push incus-box-init into container"
+
+    # Write the config file that incus-box-init reads
+    ${INCUS} exec "${name}" -- sh -c "cat > /etc/incus-box-container" <<CONF
+INCUSBOX_CONTAINER_NAME=${container_name}
+INCUSBOX_HOST_USER=${container_user_name}
+INCUSBOX_HOST_UID=${container_user_uid}
+INCUSBOX_HOST_GID=${container_user_gid}
+INCUSBOX_HOST_HOME=${container_user_home}
+INCUSBOX_CONTAINER_HOME=${effective_home}
+INCUSBOX_ADDITIONAL_PACKAGES=${container_additional_packages}
+INCUSBOX_PRE_INIT_HOOK=${container_pre_init_hook}
+INCUSBOX_INIT_HOOK=${container_init_hook}
+INCUSBOX_INIT=${init}
+INCUSBOX_NVIDIA=${nvidia}
+CONF
+
+    # Run incus-box-init in the background so this call returns immediately.
+    # incus-box-enter will poll /run/incus-box-ready as usual.
+    ${INCUS} exec "${name}" -- \
+        sh -c 'nohup /usr/local/bin/incus-box-init > /var/log/incus-box-init.log 2>&1 &' \
+        2>/dev/null || die "Failed to start incus-box-init in container"
+
+    printf >&2 '\033[32m[ OK ]\033[0m\n'
+    info "incus-box-init running in background — incus-box-enter will wait for /run/incus-box-ready"
+}
+
+main "$@"
