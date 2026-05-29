@@ -1,0 +1,58 @@
+.TH INCUSBOX-ASSEMBLE 1 "2026" "incus-box 0.1.0" "User Commands"
+.SH NAME
+incus-box-assemble \- create incus-box containers from a declarative YAML file
+.SH SYNOPSIS
+.B incus-box assemble
+.RB [ \-f
+.IR FILE ]
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B incus-box-assemble
+reads a YAML file describing one or more containers and creates them by
+calling
+.BR incus-box-create (1)
+for each entry. Containers that already exist are skipped unless
+.B \-\-replace
+is given.
+.SH OPTIONS
+.TP
+.BI \-f " FILE" "\fR,\fP \-\-file " FILE
+Path to the assemble YAML file. Default:
+.IR incus-box.yaml .
+.TP
+.B \-\-replace
+Remove and recreate containers that already exist.
+.TP
+.B \-r ", " \-\-root
+Use rootful
+.BR incus (1).
+.TP
+.B \-v ", " \-\-verbose
+Show verbose output.
+.TP
+.B \-h ", " \-\-help
+Show help and exit.
+.SH FILE FORMAT
+The assemble file is a YAML document with a top-level
+.B containers
+list. Each entry supports the same options as
+.BR incus-box-create (1):
+.PP
+.RS
+.nf
+containers:
+  - name: mybox
+    image: images:ubuntu/24.04/cloud
+    home: /home/user
+    additional_packages: ripgrep fd-find
+    init_hooks: |
+      curl -fsSL https://example.com/setup.sh | sh
+.fi
+.RE
+.PP
+See
+.I docs/example-assemble.yaml
+in the source tree for a full example.
+.SH SEE ALSO
+.BR incus-box (1),
+.BR incus-box-create (1)
