@@ -1,0 +1,69 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# incus-box-host-exec: execute a command on the host from inside an incus-box container.
+# Adapted from distrobox-host-exec.
+#
+# This script is bind-mounted read-only into the container at
+# /usr/local/bin/incus-box-host-exec by incus-box-create.
+#
+# Inside the container, the host root filesystem is available at /run/host.
+# We use nsenter to escape the container's namespaces and run the command
+# in the host's context.
+
+set -e
+
+# ── detect if we are inside a container ──────────────────────────────────────
+if [ ! -f /run/incus-box-ready ] && [ -z "${INCUSBOX}" ]; then
+    printf >&2 'incus-box-host-exec: not running inside an incus-box container\n'
+    exit 1
+fi
+
+show_help() {
+    cat <<EOF
+incus-box-host-exec: run a command on the host from inside an incus-box container
+
+Usage:
+  incus-box-host-exec COMMAND [ARGS...]
+
+Examples:
+  incus-box-host-exec flatpak run org.mozilla.firefox
+  incus-box-host-exec systemctl --user status
+  incus-box-host-exec bash
+
+The command is executed in the host's mount, network, PID, and UTS namespaces.
+EOF
+}
+
+case "$1" in
+    -h|--help) show_help; exit 0 ;;
+    "") show_help; exit 1 ;;
+esac
+
+# ── find the host PID 1 to nsenter into ──────────────────────────────────────
+# nsenter requires CAP_SYS_PTRACE to attach to another process's namespaces.
+# Standard Incus containers don't have this capability, so we check whether
+# /proc/1/ns/mnt is actually readable before attempting nsenter.
+# If not readable, fall through to the chroot /run/host fallback.
+
+HOST_PID1_NS="/proc/1/ns"
+
+if [ -r "${HOST_PID1_NS}/mnt" ]; then
+    # Use nsenter to run in host namespaces.
+    # -m: mount namespace  -u: UTS  -i: IPC  -n: network  -p: PID
+    # We do NOT enter the user namespace (-U) as that would drop privileges.
+    exec nsenter \
+        --mount="${HOST_PID1_NS}/mnt" \
+        --uts="${HOST_PID1_NS}/uts" \
+        --ipc="${HOST_PID1_NS}/ipc" \
+        --net="${HOST_PID1_NS}/net" \
+        --pid="${HOST_PID1_NS}/pid" \
+        --target=1 \
+        -- "$@"
+fi
+
+# Fallback: chroot into /run/host and exec there.
+if [ ! -d /run/host ]; then
+    printf >&2 'incus-box-host-exec: /run/host not found — is the host root mounted?\n'
+    exit 1
+fi
+exec chroot /run/host "$@"
