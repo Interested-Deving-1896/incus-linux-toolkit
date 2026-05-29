@@ -1,0 +1,182 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incus-box-upgrade: upgrade packages inside one or more incus-box containers
+# shellcheck disable=SC2034,SC2015
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incus-box/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+rootful=0
+all=0
+verbose=0
+check_only=0
+no_snapshot=0
+version="0.1.0"
+
+# (config loading and helpers provided by lib.sh)
+
+show_help() {
+    cat <<EOF
+incus-box version: ${version}
+
+Usage:
+  incus-box upgrade [OPTIONS] [NAME...]
+
+Options:
+  -a, --all          Upgrade all incus-box containers
+  -r, --root         Use rootful incus
+  -v, --verbose      Show verbose output
+      --check        Check for available updates without installing
+      --no-snapshot  Skip the pre-upgrade snapshot
+  -V, --version      Show version
+  -h, --help         Show this help
+
+Examples:
+  incus-box upgrade mybox
+  incus-box upgrade --all
+  incus-box upgrade --check mybox
+  incus-box upgrade --no-snapshot mybox
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -a|--all)        all=1;                      shift ;;
+        -r|--root)       rootful=1;                  shift ;;
+        -v|--verbose)    verbose=1;                  shift ;;
+        --check)         check_only=1;               shift ;;
+        --no-snapshot)   no_snapshot=1;              shift ;;
+        -V|--version)    printf '%s\n' "${version}"; exit 0 ;;
+        -h|--help)       show_help; exit 0 ;;
+        --) shift; break ;;
+        -*) die "Unknown option: $1" ;;
+        *)  break ;;
+    esac
+done
+
+resolve_incus
+require_incus
+
+upgrade_container() {
+    local name="$1"
+    local status manager
+
+    # Warn if this container wasn't created by incus-box
+    manager="$(${INCUS} config get "${name}" user.manager 2>/dev/null || true)"
+    if [ "${manager}" != "incus-box" ]; then
+        log "Warning: '${name}' was not created by incus-box (user.manager=${manager:-unset})"
+    fi
+
+    status="$(${INCUS} info "${name}" 2>/dev/null | awk '/^Status:/ {print tolower($2)}')"
+    if [ "${status}" != "running" ]; then
+        log "Starting ${name} for upgrade..."
+        ${INCUS} start "${name}" || { log "Failed to start ${name}, skipping"; return 1; }
+    fi
+
+    # Use stored distro hint from incus-box metadata when available; fall back to
+    # runtime package-manager detection for containers not created by incus-box.
+    local distro_hint
+    distro_hint="$(${INCUS} config get "${name}" user.incus-box.distro 2>/dev/null || true)"
+
+    # Pre-upgrade snapshot
+    if [ "${no_snapshot}" -eq 0 ] && [ "${check_only}" -eq 0 ]; then
+        local snap_name
+        snap_name="pre-upgrade-$(date +%Y%m%d-%H%M%S)"
+        log "Creating pre-upgrade snapshot: ${snap_name}"
+        if ${INCUS} snapshot create "${name}" "${snap_name}" 2>/dev/null; then
+            log "Snapshot created: ${snap_name}"
+        else
+            warn "Snapshot failed — continuing without it"
+        fi
+    fi
+
+    if [ "${check_only}" -eq 1 ]; then
+        log "Checking for available updates in '${name}' (distro=${distro_hint:-auto})..."
+        ${INCUS} exec "${name}" -- sh -c "
+            distro='${distro_hint}'
+            case \"\${distro}\" in
+                ubuntu|debian|linuxmint|pop)
+                    apt-get update -qq && apt-get --simulate upgrade 2>/dev/null | grep '^Inst' || true ;;
+                fedora|rhel|centos|almalinux|rocky)
+                    dnf check-update 2>/dev/null || true ;;
+                arch|manjaro|endeavouros)
+                    pacman -Sy --noconfirm >/dev/null && pacman -Qu 2>/dev/null || true ;;
+                alpine)
+                    apk update -q && apk list --upgradable 2>/dev/null || true ;;
+                *)
+                    if command -v apt-get >/dev/null 2>&1; then
+                        apt-get update -qq && apt-get --simulate upgrade 2>/dev/null | grep '^Inst' || true
+                    elif command -v dnf >/dev/null 2>&1; then
+                        dnf check-update 2>/dev/null || true
+                    elif command -v pacman >/dev/null 2>&1; then
+                        pacman -Sy --noconfirm >/dev/null && pacman -Qu 2>/dev/null || true
+                    else
+                        printf 'Warning: unknown package manager in %s\n' '${name}' >&2
+                    fi ;;
+            esac
+        " && log "Check complete for '${name}'." || log "Warning: check of '${name}' exited non-zero"
+        return 0
+    fi
+
+    log "Upgrading packages in '${name}' (distro=${distro_hint:-auto})..."
+    ${INCUS} exec "${name}" -- sh -c "
+        distro='${distro_hint}'
+        case \"\${distro}\" in
+            ubuntu|debian|linuxmint|pop)
+                DEBIAN_FRONTEND=noninteractive apt-get update -y &&
+                DEBIAN_FRONTEND=noninteractive apt-get upgrade -y ;;
+            fedora|rhel|centos|almalinux|rocky)
+                dnf upgrade -y 2>/dev/null || yum upgrade -y ;;
+            arch|manjaro|endeavouros)
+                pacman -Syu --noconfirm ;;
+            alpine)
+                apk upgrade ;;
+            opensuse*|sles)
+                zypper update -y ;;
+            void)
+                xbps-install -Su ;;
+            *)
+                # No stored hint — probe at runtime
+                if command -v apt-get >/dev/null 2>&1; then
+                    DEBIAN_FRONTEND=noninteractive apt-get update -y &&
+                    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+                elif command -v dnf >/dev/null 2>&1; then
+                    dnf upgrade -y
+                elif command -v pacman >/dev/null 2>&1; then
+                    pacman -Syu --noconfirm
+                elif command -v apk >/dev/null 2>&1; then
+                    apk upgrade
+                elif command -v zypper >/dev/null 2>&1; then
+                    zypper update -y
+                elif command -v xbps-install >/dev/null 2>&1; then
+                    xbps-install -Su
+                else
+                    printf 'Warning: unknown package manager in %s\n' '${name}' >&2
+                fi ;;
+        esac
+    " && log "Upgraded '${name}'." || log "Warning: upgrade of '${name}' exited non-zero"
+}
+
+if [ "${all}" -eq 1 ]; then
+    ${INCUS} list --format csv 2>/dev/null | while IFS=',' read -r name _rest; do
+        manager="$(${INCUS} config get "${name}" user.manager 2>/dev/null || true)"
+        [ "${manager}" = "incus-box" ] || continue
+        upgrade_container "${name}"
+    done
+    exit 0
+fi
+
+[ "$#" -eq 0 ] && die "Container name required. Usage: incus-box upgrade NAME [NAME...]"
+
+for container_name in "$@"; do
+    if ! ${INCUS} info "${container_name}" >/dev/null 2>&1; then
+        log "Container '${container_name}' not found, skipping."
+        continue
+    fi
+    upgrade_container "${container_name}"
+done
