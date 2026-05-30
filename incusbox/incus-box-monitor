@@ -1,0 +1,239 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incus-box-monitor: show container resource usage and stats.
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incus-box/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+show_help() {
+    cat <<EOF
+incus-box-monitor — container resource usage and stats
+
+Usage:
+  incus-box-monitor [subcommand] [NAME]
+
+Subcommands:
+  status [NAME]   Detailed container status with resource info
+  stats  [NAME]   CPU, memory, disk, and network stats
+  top             Live overview of all containers
+  disk   [NAME]   Disk usage breakdown
+  uptime [NAME]   Container uptime and creation history
+  health          Host-level health check (Incus daemon, KVM, memory, disk)
+
+Options:
+  -h, --help      Show this help
+
+Examples:
+  incus-box monitor status mybox
+  incus-box monitor stats  mybox
+  incus-box monitor top
+  incus-box monitor disk   mybox
+  incus-box monitor uptime mybox
+  incus-box monitor health
+EOF
+}
+
+cmd_status() {
+    local name="$1"
+    [ -z "${name}" ] && { show_help; exit 1; }
+    require_incus
+    ${INCUS} info "${name}" >/dev/null 2>&1 || die "Container '${name}' not found"
+
+    local info_out status
+    info_out=$(${INCUS} info "${name}" 2>/dev/null)
+    status=$(printf '%s\n' "${info_out}" | grep "^Status:" | awk '{print $2}')
+
+    log "Container: ${name}"
+    echo ""
+    case "${status}" in
+        Running) ok  "  Status : Running" ;;
+        Stopped) info "  Status : Stopped" ;;
+        *)       info "  Status : ${status}" ;;
+    esac
+
+    local arch created profiles
+    arch=$(printf '%s\n' "${info_out}"     | grep "^Architecture:" | sed 's/^Architecture:[[:space:]]*//')
+    created=$(printf '%s\n' "${info_out}"  | grep "^Created:"      | sed 's/^Created:[[:space:]]*//')
+    profiles=$(printf '%s\n' "${info_out}" | grep "^Profiles:"     | sed 's/^Profiles:[[:space:]]*//')
+    echo "  Architecture : ${arch}"
+    echo "  Created      : ${created}"
+    echo "  Profiles     : ${profiles}"
+
+    local cpu mem
+    cpu=$(${INCUS} config get "${name}" limits.cpu    2>/dev/null || echo "?")
+    mem=$(${INCUS} config get "${name}" limits.memory 2>/dev/null || echo "?")
+    echo "  CPU limit    : ${cpu:-unset}"
+    echo "  Memory limit : ${mem:-unset}"
+
+    if [ "${status}" = "Running" ]; then
+        echo ""
+        cmd_stats "${name}"
+    fi
+}
+
+cmd_stats() {
+    local name="$1"
+    [ -z "${name}" ] && { show_help; exit 1; }
+    require_incus
+    ${INCUS} info "${name}" >/dev/null 2>&1 || die "Container '${name}' not found"
+
+    local info_out status
+    info_out=$(${INCUS} info "${name}" 2>/dev/null)
+    status=$(printf '%s\n' "${info_out}" | grep "^Status:" | awk '{print $2}')
+    [ "${status}" != "Running" ] && { info "'${name}' is not running"; return 0; }
+
+    log "Resources: ${name}"
+    echo ""
+
+    local cpu mem_limit mem_usage
+    cpu=$(${INCUS} config get "${name}" limits.cpu    2>/dev/null || echo "?")
+    mem_limit=$(${INCUS} config get "${name}" limits.memory 2>/dev/null || echo "?")
+    mem_usage=$(printf '%s\n' "${info_out}" | grep "Memory usage:" | awk '{print $NF}' || true)
+    echo "  CPU    : ${cpu:-unset} vCPU(s)"
+    if [ -n "${mem_usage}" ]; then
+        echo "  Memory : ${mem_usage} / ${mem_limit:-unset}"
+    else
+        echo "  Memory : limit ${mem_limit:-unset}"
+    fi
+
+    local net_state
+    net_state=$(printf '%s\n' "${info_out}" | grep -A20 "^Network usage:" || true)
+    if [ -n "${net_state}" ]; then
+        echo ""
+        info "Network:"
+        printf '%s\n' "${net_state}" | grep -E "Bytes|Packets" | sed 's/^/  /'
+    fi
+}
+
+cmd_top() {
+    log "incus-box containers"
+    echo ""
+    printf "  %-24s %-10s %-6s %-10s\n" "NAME" "STATUS" "CPU" "MEMORY"
+    printf "  %-24s %-10s %-6s %-10s\n" "----" "------" "---" "------"
+
+    local ct_list
+    ct_list=$(${INCUS} list --format csv -c n,s,t 2>/dev/null | grep ",container" || true)
+    [ -z "${ct_list}" ] && { info "  No containers found"; return; }
+
+    local running=0 total=0
+    while IFS=',' read -r name status _type; do
+        total=$((total+1))
+        local cpu mem
+        cpu=$(${INCUS} config get "${name}" limits.cpu    2>/dev/null || echo "?")
+        mem=$(${INCUS} config get "${name}" limits.memory 2>/dev/null || echo "?")
+        if [ "${status}" = "RUNNING" ]; then
+            running=$((running+1))
+            printf "  %-24s \033[32m%-10s\033[0m %-6s %-10s\n" "${name}" "${status}" "${cpu:-?}" "${mem:-?}"
+        else
+            printf "  %-24s %-10s %-6s %-10s\n" "${name}" "${status}" "${cpu:-?}" "${mem:-?}"
+        fi
+    done <<< "${ct_list}"
+    echo ""
+    info "Containers: ${running} running / ${total} total"
+}
+
+cmd_disk() {
+    local name="$1"
+    [ -z "${name}" ] && { show_help; exit 1; }
+    require_incus
+    ${INCUS} info "${name}" >/dev/null 2>&1 || die "Container '${name}' not found"
+
+    log "Disk: ${name}"
+    echo ""
+    local disk_size
+    disk_size=$(${INCUS} config device get "${name}" root size 2>/dev/null || echo "?")
+    echo "  Root disk allocated: ${disk_size:-pool default}"
+
+    local info_out
+    info_out=$(${INCUS} info "${name}" 2>/dev/null)
+    local disk_usage
+    disk_usage=$(printf '%s\n' "${info_out}" | grep -A5 "^Disk usage:" | grep -v "^Disk usage:" || true)
+    [ -n "${disk_usage}" ] && printf '%s\n' "${disk_usage}" | sed 's/^/  /'
+}
+
+cmd_uptime() {
+    local name="$1"
+    [ -z "${name}" ] && { show_help; exit 1; }
+    require_incus
+    ${INCUS} info "${name}" >/dev/null 2>&1 || die "Container '${name}' not found"
+
+    local info_out status created last_used
+    info_out=$(${INCUS} info "${name}" 2>/dev/null)
+    status=$(printf '%s\n' "${info_out}"    | grep "^Status:"   | awk '{print $2}')
+    created=$(printf '%s\n' "${info_out}"   | grep "^Created:"  | sed 's/^Created:[[:space:]]*//')
+    last_used=$(printf '%s\n' "${info_out}" | grep "^Last Used:" | sed 's/^Last Used:[[:space:]]*//')
+
+    log "Uptime: ${name}"
+    echo ""
+    echo "  Created   : ${created:-unknown}"
+    echo "  Last used : ${last_used:-unknown}"
+    echo "  Status    : ${status:-unknown}"
+
+    local snaps
+    snaps=$(printf '%s\n' "${info_out}" | grep -A1 "^Snapshots:" | tail -1 || true)
+    if [ -n "${snaps}" ] && ! printf '%s\n' "${snaps}" | grep -q "^Snapshots:"; then
+        echo ""
+        info "Recent snapshots:"
+        printf '%s\n' "${info_out}" | sed -n '/^Snapshots:/,/^$/p' | tail -n +2 | head -5 | sed 's/^/  /'
+    fi
+}
+
+cmd_health() {
+    log "incus-box System Health"
+    echo ""
+
+    if ${INCUS} info >/dev/null 2>&1; then
+        ok "Incus daemon: reachable"
+    else
+        warn "Incus daemon: not reachable"
+    fi
+
+    if [ -e /dev/kvm ]; then
+        ok "KVM: available"
+    else
+        info "KVM: /dev/kvm not found (containers only, no VMs)"
+    fi
+
+    local pools networks ct_total ct_running
+    pools=$(${INCUS} storage list --format csv 2>/dev/null | wc -l || echo "0")
+    networks=$(${INCUS} network list --format csv 2>/dev/null | wc -l || echo "0")
+    ct_total=$(${INCUS} list --format csv -c t 2>/dev/null | grep -c "container" || echo "0")
+    ct_running=$(${INCUS} list --format csv -c s,t 2>/dev/null | grep "RUNNING,container" | wc -l || echo "0")
+    echo "  Storage pools : ${pools}"
+    echo "  Networks      : ${networks}"
+    echo "  Containers    : ${ct_running} running / ${ct_total} total"
+
+    echo ""
+    info "Host disk:"
+    df -h / 2>/dev/null | tail -1 | awk '{printf "  Used: %s / %s (%s)\n", $3, $2, $5}'
+
+    info "Host memory:"
+    free -h 2>/dev/null | grep "^Mem:" | awk '{printf "  Used: %s / %s\n", $3, $2}' || true
+
+    echo ""
+    ok "Health check complete"
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+
+[ "$#" -eq 0 ] && { show_help; exit 0; }
+
+subcmd="$1"; shift
+case "${subcmd}" in
+    status)         cmd_status "$@" ;;
+    stats)          cmd_stats  "$@" ;;
+    top)            cmd_top ;;
+    disk)           cmd_disk   "$@" ;;
+    uptime)         cmd_uptime "$@" ;;
+    health)         cmd_health ;;
+    -h|--help|help) show_help ;;
+    # Bare name with no subcommand → status
+    *)              cmd_status "${subcmd}" ;;
+esac
