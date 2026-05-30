@@ -1,0 +1,153 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incus-box-doctor: check prerequisites and runtime environment.
+
+set -euo pipefail
+
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incus-box/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+show_help() {
+    cat <<EOF
+incus-box doctor — check prerequisites and runtime environment
+
+Usage:
+  incus-box doctor [--install] [--json]
+
+Options:
+  --install   Attempt to install any missing required tools via apt/snap
+  --json      Output results as JSON
+  -h, --help  Show this help
+EOF
+}
+
+auto_install=false
+json_out=false
+for arg in "$@"; do
+    case "${arg}" in
+        --install) auto_install=true ;;
+        --json)    json_out=true ;;
+        -h|--help) show_help; exit 0 ;;
+        *) die "Unknown option: ${arg}" ;;
+    esac
+done
+
+ok_count=0
+fail_count=0
+warn_count=0
+results=()
+
+_chk() {
+    local label="$1" ok="$2" detail="${3:-}"
+    if [ "${ok}" = "1" ]; then
+        ok_count=$((ok_count + 1))
+        results+=("ok:${label}:${detail}")
+        "${json_out}" || printf '  \033[32m✓\033[0m %s%s\n' "${label}" "${detail:+ — ${detail}}"
+    else
+        fail_count=$((fail_count + 1))
+        results+=("fail:${label}:${detail}")
+        "${json_out}" || printf '  \033[31m✗\033[0m %s%s\n' "${label}" "${detail:+ — ${detail}}"
+    fi
+}
+
+_warn() {
+    local label="$1" detail="${2:-}"
+    warn_count=$((warn_count + 1))
+    results+=("warn:${label}:${detail}")
+    "${json_out}" || printf '  \033[33m⚠\033[0m %s%s\n' "${label}" "${detail:+ — ${detail}}"
+}
+
+_try_install() {
+    local pkg="$1"
+    if "${auto_install}"; then
+        log "Installing ${pkg}..."
+        sudo apt-get install -y "${pkg}" 2>/dev/null \
+            || sudo snap install "${pkg}" 2>/dev/null \
+            || true
+    fi
+}
+
+"${json_out}" || log "incus-box doctor — checking prerequisites"
+"${json_out}" || printf '\n'
+
+# ── Required commands ─────────────────────────────────────────────────────────
+"${json_out}" || log "Required:"
+for cmd in incus bash curl jq; do
+    if command -v "${cmd}" >/dev/null 2>&1; then
+        _chk "${cmd}" 1 "$(command -v "${cmd}")"
+    else
+        _chk "${cmd}" 0 "not found"
+        _try_install "${cmd}"
+    fi
+done
+
+# ── Incus daemon ──────────────────────────────────────────────────────────────
+"${json_out}" || printf '\n'
+"${json_out}" || log "Incus daemon:"
+if incus info >/dev/null 2>&1; then
+    _chk "incus daemon" 1 "reachable"
+    incus_ver=$(incus version 2>/dev/null | head -1 || true)
+    _chk "incus version" 1 "${incus_ver}"
+else
+    _chk "incus daemon" 0 "not reachable — run: incus admin init"
+fi
+
+# ── Optional tools ────────────────────────────────────────────────────────────
+"${json_out}" || printf '\n'
+"${json_out}" || log "Optional:"
+for cmd in rclone qemu-img zstd go dialog whiptail; do
+    if command -v "${cmd}" >/dev/null 2>&1; then
+        _chk "${cmd}" 1
+    else
+        _warn "${cmd}" "not found (optional)"
+    fi
+done
+
+# ── Kernel features ───────────────────────────────────────────────────────────
+"${json_out}" || printf '\n'
+"${json_out}" || log "Kernel:"
+if [ -e /dev/kvm ]; then
+    _chk "KVM (/dev/kvm)" 1
+else
+    _warn "KVM (/dev/kvm)" "not available — VMs will use software emulation"
+fi
+if grep -q "^flags.*\bhypervisor\b" /proc/cpuinfo 2>/dev/null; then
+    _warn "nested virt" "running inside a VM — nested virtualisation may be limited"
+else
+    _chk "bare-metal" 1
+fi
+
+# ── User / permissions ────────────────────────────────────────────────────────
+"${json_out}" || printf '\n'
+"${json_out}" || log "Permissions:"
+if groups | grep -qw "incus-admin\|incus\|lxd"; then
+    _chk "incus group membership" 1
+else
+    _warn "incus group membership" "user not in incus/incus-admin group — may need sudo"
+fi
+
+# ── Output ────────────────────────────────────────────────────────────────────
+if "${json_out}"; then
+    printf '{"ok":%d,"fail":%d,"warn":%d,"results":[' \
+        "${ok_count}" "${fail_count}" "${warn_count}"
+    first=true
+    for r in "${results[@]}"; do
+        IFS=: read -r status label detail <<< "${r}"
+        "${first}" || printf ','
+        first=false
+        printf '{"status":"%s","label":"%s","detail":"%s"}' \
+            "${status}" "${label}" "${detail}"
+    done
+    printf ']}\n'
+else
+    printf '\n'
+    if [ "${fail_count}" -eq 0 ]; then
+        ok "All required checks passed (${ok_count} ok, ${warn_count} warnings)"
+    else
+        printf '\033[31m%d check(s) failed\033[0m, %d ok, %d warnings\n' \
+            "${fail_count}" "${ok_count}" "${warn_count}"
+        exit 1
+    fi
+fi
