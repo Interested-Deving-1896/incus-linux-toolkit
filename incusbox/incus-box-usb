@@ -1,0 +1,169 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incus-box-usb: manage USB device passthrough for incus-box containers.
+
+set -euo pipefail
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incus-box/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+show_help() {
+    cat <<EOF
+incus-box-usb — manage USB device passthrough for containers
+
+Usage:
+  incus-box-usb list-host              List USB devices available on the host
+  incus-box-usb attach  NAME VID PID   Attach a USB device (VID and PID separate)
+  incus-box-usb attach  NAME VID:PID   Attach a USB device (VID:PID shorthand)
+  incus-box-usb detach  NAME DEV_NAME  Remove a USB device from a container
+  incus-box-usb list    NAME           List USB devices attached to a container
+
+Arguments:
+  NAME       Container name
+  VID        USB vendor ID  (4 hex digits, e.g. 046d)
+  PID        USB product ID (4 hex digits, e.g. c52b)
+  DEV_NAME   Device name as shown by 'incus-box usb list NAME'
+
+Options:
+  --dev-name NAME   Custom device name for attach (default: usb-<VID>-<PID>)
+  -h, --help        Show this help
+
+Examples:
+  incus-box usb list-host
+  incus-box usb attach  mybox 046d c52b
+  incus-box usb attach  mybox 046d:c52b
+  incus-box usb list    mybox
+  incus-box usb detach  mybox usb-046d-c52b
+EOF
+}
+
+# ── list-host ─────────────────────────────────────────────────────────────────
+
+cmd_list_host() {
+    log "USB devices on host:"
+    echo ""
+
+    if command -v lsusb >/dev/null 2>&1; then
+        printf "  %-10s %-10s %s\n" "VENDOR:ID" "BUS:DEV" "DESCRIPTION"
+        printf "  %-10s %-10s %s\n" "---------" "-------" "-----------"
+        lsusb | while IFS= read -r line; do
+            # Bus 001 Device 003: ID 046d:c52b Logitech, Inc. Unifying Receiver
+            local bus dev vid pid desc
+            bus=$(printf '%s\n' "${line}" | awk '{print $2}')
+            dev=$(printf '%s\n' "${line}" | awk '{print $4}' | tr -d ':')
+            vid=$(printf '%s\n' "${line}" | awk '{print $6}' | cut -d: -f1)
+            pid=$(printf '%s\n' "${line}" | awk '{print $6}' | cut -d: -f2)
+            desc=$(printf '%s\n' "${line}" | cut -d: -f3- | sed 's/^ //')
+            printf "  %-10s %-10s %s\n" "${vid}:${pid}" "${bus}:${dev}" "${desc}"
+        done
+    else
+        # Fallback: incus info --resources
+        if ${INCUS} info --resources >/dev/null 2>&1; then
+            ${INCUS} info --resources 2>/dev/null | awk '
+                /^  USB devices:/,/^  [A-Z]/ {
+                    if (!/^  USB devices:/ && !/^  [A-Z]/) print "  " $0
+                }
+            '
+        else
+            warn "lsusb not found and incus resources unavailable"
+            info "Install usbutils: apt install usbutils"
+        fi
+    fi
+}
+
+# ── attach ────────────────────────────────────────────────────────────────────
+
+cmd_attach() {
+    local name="$1"
+    local vid="$2"
+    local pid="${3:-}"
+    [ -z "${name}" ] || [ -z "${vid}" ] && { show_help; exit 1; }
+    # Support VID:PID as a single argument
+    if [ -z "${pid}" ] && printf '%s\n' "${vid}" | grep -q ':'; then
+        pid="${vid##*:}"
+        vid="${vid%%:*}"
+        shift 2
+    elif [ -n "${pid}" ]; then
+        shift 3
+    else
+        show_help; exit 1
+    fi
+
+    local dev_name="usb-${vid}-${pid}"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --dev-name) dev_name="$2"; shift 2 ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+
+    require_incus
+
+    log "Attaching USB device ${vid}:${pid} to '${name}' as '${dev_name}'"
+    ${INCUS} config device add "${name}" "${dev_name}" usb \
+        "vendorid=${vid}" "productid=${pid}"
+    log "USB device attached: ${dev_name} (${vid}:${pid}) → ${name}"
+}
+
+# ── detach ────────────────────────────────────────────────────────────────────
+
+cmd_detach() {
+    local name="$1"
+    local dev_name="$2"
+    [ -z "${name}" ] || [ -z "${dev_name}" ] && { show_help; exit 1; }
+    require_incus
+
+    ${INCUS} config device remove "${name}" "${dev_name}"
+    log "USB device removed: ${dev_name} from '${name}'"
+}
+
+# ── list ──────────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    local name="$1"
+    [ -z "${name}" ] && { show_help; exit 1; }
+    require_incus
+
+    log "USB devices attached to '${name}':"
+    echo ""
+    printf "  %-20s %-10s %s\n" "DEVICE" "VENDOR" "PRODUCT"
+    printf "  %-20s %-10s %s\n" "------" "------" "-------"
+
+    local found=false
+    while IFS= read -r dev; do
+        [ -n "${dev}" ] || continue
+        local vid pid
+        vid=$(${INCUS} config device get "${name}" "${dev}" vendorid  2>/dev/null || echo "")
+        pid=$(${INCUS} config device get "${name}" "${dev}" productid 2>/dev/null || echo "")
+        [ -n "${vid}" ] || continue
+        found=true
+        printf "  %-20s %-10s %s\n" "${dev}" "${vid}" "${pid}"
+    done < <(${INCUS} config device list "${name}" 2>/dev/null \
+             | grep "usb" | awk '{print $1}' || true)
+
+    if ! ${found}; then
+        info "  No USB devices attached"
+    fi
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+
+[ "$#" -eq 0 ] && { show_help; exit 0; }
+
+subcmd="$1"; shift
+case "${subcmd}" in
+    list-host|host)     cmd_list_host ;;
+    attach|add)         cmd_attach "$@" ;;
+    detach|remove|rm)   cmd_detach "$@" ;;
+    list|ls)            cmd_list   "$@" ;;
+    -h|--help|help)     show_help ;;
+    *)
+        printf >&2 "incus-box-usb: unknown subcommand '%s'\n" "${subcmd}"
+        printf >&2 "Run 'incus-box-usb --help' for usage.\n"
+        exit 1 ;;
+esac
