@@ -1,0 +1,113 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incus-box-publish: publish a container as a reusable Incus image.
+#
+# Uses 'incus publish' to create an image from a stopped container.
+# The image can be used to create new containers with 'incus init <alias>'.
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incus-box/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+
+show_help() {
+    cat <<EOF
+incus-box-publish — create and manage Incus images from containers
+
+Usage:
+  incus-box publish create NAME [--alias ALIAS] [--output PATH]
+  incus-box publish list
+  incus-box publish delete ALIAS
+
+Subcommands:
+  create NAME   Publish a container as a reusable Incus image
+  list          List published incus-box images
+  delete ALIAS  Delete a published image by alias
+
+Options (create):
+  --alias ALIAS     Image alias (default: incus-box-NAME)
+  --output PATH     Also export the image to a file at PATH
+  -h, --help        Show this help
+
+Examples:
+  incus-box publish create mybox
+  incus-box publish create mybox --alias mybox-golden
+  incus-box publish list
+  incus-box publish delete mybox-golden
+EOF
+}
+
+_cmd_create() {
+    local name="" alias_name="" output=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --alias)   alias_name="$2"; shift 2 ;;
+            --output)  output="$2";     shift 2 ;;
+            -h|--help) show_help; exit 0 ;;
+            -*) die "Unknown option: $1" ;;
+            *) name="$1"; shift ;;
+        esac
+    done
+
+    [ -z "${name}" ] && { show_help; exit 1; }
+    [ -z "${alias_name}" ] && alias_name="incus-box-${name}"
+
+    require_incus
+    ${INCUS} info "${name}" >/dev/null 2>&1 || die "Container '${name}' not found"
+
+    was_running=0
+    if ${INCUS} info "${name}" 2>/dev/null | grep -q "^Status:.*Running"; then
+        was_running=1
+        log "Stopping '${name}' for publish ..."
+        ${INCUS} stop "${name}"
+    fi
+
+    log "Publishing '${name}' as image '${alias_name}' ..."
+    ${INCUS} publish "${name}" --alias "${alias_name}"
+    log "Published: ${alias_name}"
+
+    if [ -n "${output}" ]; then
+        log "Exporting image to file: ${output} ..."
+        ${INCUS} image export "${alias_name}" "${output}"
+        log "Image file: ${output}"
+    fi
+
+    [ "${was_running}" -eq 1 ] && { log "Restarting '${name}' ..."; ${INCUS} start "${name}"; }
+
+    log "Create a new container from this image:"
+    log "  incus-box create --image ${alias_name} --name <new-name>"
+}
+
+_cmd_list() {
+    require_incus
+    log "Published incus-box images:"
+    ${INCUS} image list --format table 2>/dev/null | grep -E "ALIAS|incus-box" || \
+        info "No published images found. Use: incus-box publish create NAME"
+}
+
+_cmd_delete() {
+    local alias_name="${1:-}"
+    [ -z "${alias_name}" ] && die "Usage: incus-box publish delete ALIAS"
+    require_incus
+    log "Deleting image '${alias_name}' ..."
+    ${INCUS} image delete "${alias_name}"
+    log "Deleted: ${alias_name}"
+}
+
+[ "$#" -eq 0 ] && { show_help; exit 0; }
+subcmd="$1"; shift
+case "${subcmd}" in
+    create)        _cmd_create "$@" ;;
+    list|ls)       _cmd_list   "$@" ;;
+    delete|rm)     _cmd_delete "$@" ;;
+    -h|--help|help) show_help ;;
+    # Legacy: bare NAME passed directly (backwards compat)
+    -*) die "Unknown option: ${subcmd}. Run: incus-box publish help" ;;
+    *)  _cmd_create "${subcmd}" "$@" ;;
+esac
