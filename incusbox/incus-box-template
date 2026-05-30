@@ -1,0 +1,132 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incus-box-template: list and inspect container creation templates.
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incus-box/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+# Template directory: alongside this script, or in share path
+_script_dir="$(cd "$(dirname "$0")" && pwd)"
+TEMPLATES_DIR="${INCUSBOX_TEMPLATES_DIR:-}"
+if [ -z "${TEMPLATES_DIR}" ]; then
+    if [ -d "${_script_dir}/templates" ]; then
+        TEMPLATES_DIR="${_script_dir}/templates"
+    elif [ -d "/usr/share/incus-box/templates" ]; then
+        TEMPLATES_DIR="/usr/share/incus-box/templates"
+    else
+        TEMPLATES_DIR="${_script_dir}/templates"
+    fi
+fi
+
+show_help() {
+    cat <<EOF
+incus-box-template — list and inspect container creation templates
+
+Usage:
+  incus-box-template list
+  incus-box-template show NAME
+
+Subcommands:
+  list          List available templates
+  show NAME     Display a template's settings
+
+Templates are YAML files in: ${TEMPLATES_DIR}
+Override with: INCUSBOX_TEMPLATES_DIR=/path/to/templates
+
+Use with create:
+  incus-box create --template dev --name mybox
+  incus-box create --template minimal --name testbox
+
+Options:
+  -h, --help    Show this help
+EOF
+}
+
+_tpl_get() {
+    local file="$1" key="$2" default="${3:-}"
+    local val
+    val=$(grep "^${key}:" "${file}" | head -1 | sed "s/^${key}:[[:space:]]*//" | tr -d '"')
+    printf '%s' "${val:-${default}}"
+}
+
+_tpl_get_nested() {
+    local file="$1" section="$2" key="$3" default="${4:-}"
+    local in_section=false val=""
+    while IFS= read -r line; do
+        if printf '%s\n' "${line}" | grep -q "^${section}:"; then
+            in_section=true; continue
+        fi
+        if ${in_section} && printf '%s\n' "${line}" | grep -qE "^[a-z]"; then
+            break
+        fi
+        if ${in_section}; then
+            local trimmed
+            trimmed=$(printf '%s\n' "${line}" | sed 's/^[[:space:]]*//')
+            if printf '%s\n' "${trimmed}" | grep -q "^${key}:"; then
+                val=$(printf '%s\n' "${trimmed}" | sed "s/^${key}:[[:space:]]*//" | tr -d '"')
+                break
+            fi
+        fi
+    done < "${file}"
+    printf '%s' "${val:-${default}}"
+}
+
+cmd_list() {
+    local found=false
+    for tpl in "${TEMPLATES_DIR}"/*.yaml; do
+        [ -f "${tpl}" ] || continue
+        found=true
+        local name desc
+        name=$(basename "${tpl}" .yaml)
+        desc=$(_tpl_get "${tpl}" "description")
+        printf "  %-12s %s\n" "${name}" "${desc}"
+    done
+    if ! ${found}; then
+        info "No templates found in ${TEMPLATES_DIR}"
+        return 1
+    fi
+}
+
+cmd_show() {
+    local name="$1"
+    [ -z "${name}" ] && { show_help; exit 1; }
+    local tpl="${TEMPLATES_DIR}/${name}.yaml"
+    [ -f "${tpl}" ] || die "Template not found: ${name}"
+
+    local desc image cpu mem init nvidia unshare_netns
+    desc=$(_tpl_get "${tpl}" "description")
+    image=$(_tpl_get "${tpl}" "image" "(not set)")
+    cpu=$(_tpl_get_nested "${tpl}" "resources" "cpu" "(not set)")
+    mem=$(_tpl_get_nested "${tpl}" "resources" "memory" "(not set)")
+    init=$(_tpl_get "${tpl}" "init" "false")
+    nvidia=$(_tpl_get "${tpl}" "nvidia" "false")
+    unshare_netns=$(_tpl_get "${tpl}" "unshare_netns" "false")
+
+    log "Template: ${name}"
+    echo ""
+    echo "  Description  : ${desc}"
+    echo "  Image        : ${image}"
+    echo "  CPU          : ${cpu}"
+    echo "  Memory       : ${mem}"
+    echo "  Init system  : ${init}"
+    echo "  NVIDIA GPU   : ${nvidia}"
+    echo "  Isolated net : ${unshare_netns}"
+}
+
+[ "$#" -eq 0 ] && { show_help; exit 0; }
+
+subcmd="$1"; shift
+case "${subcmd}" in
+    list|ls)        cmd_list ;;
+    show)           cmd_show "$@" ;;
+    -h|--help|help) show_help ;;
+    *)
+        printf >&2 "incus-box-template: unknown subcommand '%s'\n" "${subcmd}"
+        printf >&2 "Run 'incus-box-template --help' for usage.\n"
+        exit 1 ;;
+esac
