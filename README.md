@@ -64,10 +64,10 @@ _CI documentation pending._
 ## Mirror chain
 
 <!-- AI:start:mirror-chain -->
-This repo is maintained in [`Interested-Deving-1896/incus-box`](https://github.com/Interested-Deving-1896/incus-box) and mirrored through:
+This repo is maintained in [`Interested-Deving-1896/incus-linux-toolkit`](https://github.com/Interested-Deving-1896/incus-linux-toolkit) and mirrored through:
 
 ```
-Interested-Deving-1896/incus-box  ──►  OpenOS-Project-OSP/incus-box  ──►  OpenOS-Project-Ecosystem-OOC/incus-box
+Interested-Deving-1896/incus-linux-toolkit  ──►  OpenOS-Project-OSP/incus-linux-toolkit  ──►  OpenOS-Project-Ecosystem-OOC/incus-linux-toolkit
 ```
 
 Changes flow downstream automatically via the hourly mirror chain in
@@ -84,14 +84,13 @@ _Contributors pending._
 ## Origins
 
 <!-- AI:start:origins -->
-Original project — clean-room reimplementation of the distrobox concept using Incus instead of
-Docker/Podman. Not a git fork of distrobox; shares the UX model and subcommand structure but
-replaces the entire container runtime layer.
 
-| Origin | Host | Relationship |
-|--------|------|-------------|
-| [lxc/incus](https://github.com/lxc/incus) | GitHub | Runtime dependency — tracked as upstream |
-| [89luca89/distrobox](https://github.com/89luca89/distrobox) | GitHub | Conceptual upstream — feature reference only, not synced |
+Original project — Incus-backed distrobox replacement using any Linux distro in the terminal via Incus containers.
+
+| Origin | Host | Fork in I-D-1896 |
+|--------|------|-----------------|
+| [lxc/incus](https://github.com/lxc/incus) | GitHub | ✅ |
+| [89luca89/distrobox](https://github.com/89luca89/distrobox) | GitHub | ✅ |
 <!-- AI:end:origins -->
 
 ## Resources
@@ -99,12 +98,12 @@ replaces the entire container runtime layer.
 <!-- AI:start:resources -->
 | File | Description |
 |---|---|
-| [dep-graph/origins.md](https://github.com/Interested-Deving-1896/incus-box/blob/main/dep-graph/origins.md) | Dependency graph (Markdown table) |
-| [config/gitlab-subgroups.yml](https://github.com/Interested-Deving-1896/incus-box/blob/main/config/gitlab-subgroups.yml) | GitLab subgroup map |
+| [dep-graph/origins.md](https://github.com/Interested-Deving-1896/incus-linux-toolkit/blob/main/dep-graph/origins.md) | Dependency graph (Markdown table) |
+| [config/gitlab-subgroups.yml](https://github.com/Interested-Deving-1896/incus-linux-toolkit/blob/main/config/gitlab-subgroups.yml) | GitLab subgroup map |
 <!-- AI:end:resources -->
 
 ## License
 
 <!-- AI:start:license -->
-[GPL-3.0](https://github.com/Interested-Deving-1896/incus-box/blob/main/LICENSE) © 2026 [Interested-Deving-1896](https://github.com/Interested-Deving-1896)
+[GPL-3.0](https://github.com/Interested-Deving-1896/incus-linux-toolkit/blob/main/LICENSE) © 2026 [Interested-Deving-1896](https://github.com/Interested-Deving-1896)
 <!-- AI:end:license -->
